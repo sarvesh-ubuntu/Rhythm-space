@@ -4,627 +4,213 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <meta name="theme-color" content="#1a1207">
-<meta name="description" content="Rhythm space — a lightweight music notation workspace">
-<meta name="apple-mobile-web-app-capable" content="yes">
-<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
-<meta name="apple-mobile-web-app-title" content="Rhythm space">
+<title>Dashboard — Rhythm space</title>
 <link rel="manifest" href="manifest.json">
 <link rel="apple-touch-icon" href="icon-192.png">
-<title>Rhythm space — Music Workspace</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
-<link href="https://fonts.googleapis.com/css2?family=EB+Garamond:ital,wght@0,400;0,500;0,600;1,400&display=swap" rel="stylesheet">
-<!-- Bravura SMuFL font, bundled in fonts/. The engine uses SMuFL codepoints
-     (U+E050 gClef, U+E062 fClef) and falls back to Times New Roman until
-     Bravura finishes loading (see app.js font-loading block + engine.js
-     _isBravuraLoaded).
-
-     NOTE: the .woff2/.woff files redistributed in Steinberg's official
-     Bravura repo are malformed (invalid cmap table — see
-     github.com/steinbergmedia/bravura/issues/32) and are rejected outright
-     by Chrome/Firefox's font sanitizer. fonts/Bravura.woff2 here was
-     re-encoded from the (valid) official .otf using fonttools, not copied
-     from the official redist/woff2 folder — don't swap it back in without
-     re-checking that issue is still open. woff2-only (no otf fallback):
-     every browser still receiving updates supports woff2. -->
-<link rel="preload" href="fonts/Bravura.woff2" as="font" type="font/woff2" crossorigin>
-<style>
-@font-face {
-  font-family: 'Bravura';
-  src: url('fonts/Bravura.woff2') format('woff2');
-  font-weight: normal;
-  font-style: normal;
-  font-display: swap;
-}
-</style>
+<link href="https://fonts.googleapis.com/css2?family=EB+Garamond:ital,wght@0,400;0,500;0,600;1,400&family=Cinzel:wght@400;600&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="css/style.css">
+<link rel="stylesheet" href="css/dashboard.css">
 </head>
-<body>
-<script src="js/auth.js"></script>
-<script>
-  // Auth guard: bounce to the login screen if nobody's signed in.
-  // Runs before the rest of the page's scripts so app.js never has to
-  // deal with a null user.
-  if (!window.RymAuth.getCurrentUser()) {
-    window.location.replace('login.html');
-  }
-</script>
+<body class="dash-body">
 
-<!-- ── Header ─────────────────────────────────────────────────── -->
-<header class="header">
-  <div class="logo">
-    <span class="logo-mark" aria-hidden="true">R</span>
-    <span class="logo-text">Rhythm space <em>/ music workspace</em></span>
-  </div>
-
-  <div class="title-field">
-    <span class="title-icon" aria-hidden="true">✎</span>
-    <input id="comp-title" type="text" placeholder="Untitled Composition"
-           maxlength="80" spellcheck="false" autocomplete="off">
-  </div>
-
-  <div class="toolbar">
-
-    <div class="tb-group">
-      <button class="tool-btn cat-btn" id="btn-category" data-menu="category-menu" title="Category — controls how this part sounds during playback">
-        <span class="cat-icon" id="cat-btn-icon"></span>
-        <span id="cat-btn-label">Piano</span>
-      </button>
-
-      <select id="sel-clef" class="sel">
-        <option value="treble">Treble</option>
-        <option value="bass">Bass</option>
-        <option value="alto">Alto</option>
-        <option value="tenor">Tenor</option>
-      </select>
-
-      <select id="sel-timesig" class="sel">
-        <option value="4/4">4/4</option><option value="3/4">3/4</option>
-        <option value="2/4">2/4</option><option value="2/2">2/2</option>
-        <option value="6/8">6/8</option><option value="9/8">9/8</option>
-        <option value="12/8">12/8</option><option value="5/4">5/4</option>
-        <option value="7/8">7/8</option>
-      </select>
+<header class="dash-header">
+  <div class="logo">Rhythm space <em>/ music workspace</em></div>
+  <div class="dash-user">
+    <div class="user-chip">
+      <span class="user-avatar" id="user-avatar">?</span>
+      <span class="user-name" id="user-name">—</span>
     </div>
-
-    <div class="tb-group tb-group-icons">
-      <button class="icon-btn" id="btn-undo" title="Undo (⌘Z)">↶</button>
-      <button class="icon-btn" id="btn-redo" title="Redo (⌘⇧Z)">↷</button>
-    </div>
-
-    <div class="tb-group">
-      <button class="btn" id="btn-new">New</button>
-      <button class="btn" id="btn-save">Save</button>
-      <button class="btn" id="btn-load">Load</button>
-      <button class="btn btn-primary" id="btn-export">Export</button>
-    </div>
-
-    <div class="tb-group">
-      <button class="btn btn-sm" id="btn-import-xml" title="Import MusicXML file">Import XML</button>
-      <button class="btn btn-sm" id="btn-export-xml" title="Export as MusicXML">Export XML</button>
-    </div>
-
-    <div class="tb-group tb-group-icons">
-      <button class="icon-btn" id="btn-hotkeys" title="Keyboard shortcuts">?</button>
-    </div>
-
-  </div>
-
-  <div class="header-user">
-    <a class="btn" href="dashboard.html" title="Back to dashboard">⌂ Dashboard</a>
-    <span class="user-name" id="header-user-name"></span>
-    <button class="btn" id="btn-signout" title="Sign out">Sign Out</button>
+    <button class="btn" id="btn-signout">Sign Out</button>
   </div>
 </header>
 
-<!-- ── Status bar ─────────────────────────────────────────────── -->
-<div class="status-bar">
-  <div class="si">Octave <span class="sv" id="sv-octave">4</span></div>
-  <div class="si">Dur <span class="sv" id="sv-dur">Quarter</span></div>
-  <div class="si">Instr <span class="sv" id="sv-inst">Piano</span></div>
-  <div class="si">Clef <span class="sv" id="sv-clef">Treble</span></div>
-  <div class="si">Time <span class="sv" id="sv-timesig">4/4</span></div>
-  <div class="si">Key <span class="sv" id="sv-key">C</span></div>
-  <div class="si">Events <span class="sv" id="sv-count">0</span></div>
-  <div class="si">Parts <span class="sv" id="sv-parts">1</span></div>
-  <div class="si" id="si-staccato">Stacc <span class="sv" id="sv-staccato">OFF</span></div>
-  <div class="si" id="si-note" style="margin-left:auto;border-right:none;font-style:italic"></div>
-</div>
+<div class="dash-body-wrap">
 
-<!-- ── Workspace ──────────────────────────────────────────────── -->
-<div class="editor-disclaimer">
-  Cloud sync is rolling out now. Keep exported backups of anything
-  important, because browser storage and autosave are still best effort.
-</div>
+  <nav class="dash-tabs">
+    <button class="dash-tab active" type="button" data-tab="overview"><span class="tab-icon">⌂</span> Overview</button>
+    <button class="dash-tab" type="button" data-tab="sheets"><span class="tab-icon">♪</span> My Sheets</button>
+  </nav>
 
-<div class="workspace">
+  <main class="dash-main">
 
-  <!-- Command bar -->
-  <div class="cmdbar" id="cmdbar">
-    <div class="cmd-group">
-      <button class="icon-btn" id="btn-add-part" title="Add part">+</button>
-      <button class="tool-btn" id="btn-parts" data-menu="parts-menu">
-        Parts <span class="part-count" id="part-count">1</span>
-      </button>
-    </div>
+    <section class="dash-panel" id="panel-overview">
+      <h1>Welcome back<span id="welcome-name"></span></h1>
+      <p class="dash-sub">Pick up where you left off, or start something new.</p>
 
-    <div class="cmd-sep"></div>
+      <div class="dash-grid">
+        <a class="dash-card dash-card-primary" href="editor.html?new=1">
+          <div class="dash-card-icon">+</div>
+          <div class="dash-card-title">New Composition</div>
+          <div class="dash-card-desc">Open a blank score in the workspace.</div>
+        </a>
 
-    <div class="cmd-group">
-      <button class="tool-btn" id="btn-dynamics"><em>mf</em> Dynamics</button>
-      <button class="tool-btn" id="btn-staccato-mode" title="Toggle staccato mode — all new notes get staccato">· Staccato</button>
-      <button class="tool-btn" id="btn-marks"    data-menu="marks-menu">Marks</button>
-      <button class="tool-btn" id="btn-insert"   data-menu="insert-menu">Insert</button>
-      <button class="tool-btn" id="btn-score"    data-menu="score-menu">Score</button>
-      <button class="tool-btn" id="btn-instmarks">Inst. Marks</button>
-    </div>
+        <a class="dash-card" href="editor.html">
+          <div class="dash-card-icon">↺</div>
+          <div class="dash-card-title">Resume Last Session</div>
+          <div class="dash-card-desc">Continue from your autosaved draft.</div>
+        </a>
 
-    <div class="cmd-group playback-group">
-      <div class="bpm-wrap">
-        <span class="bpm-lbl">♩=</span>
-        <input id="pb-bpm" type="number" min="20" max="300" value="120" class="bpm-input">
+        <button class="dash-card" type="button" data-goto-tab="sheets">
+          <div class="dash-card-icon">♪</div>
+          <div class="dash-card-title">My Sheets</div>
+          <div class="dash-card-desc">Browse compositions saved to your account.</div>
+          <span class="dash-badge dash-badge-live">Cloud</span>
+        </button>
       </div>
-      <button class="icon-btn" id="pb-play" title="Play/Stop (F5)">▶</button>
-      <div class="pb-time" id="pb-time">0:00</div>
-    </div>
-  </div>
+    </section>
 
-  <!-- Category menu (icon grid) -->
-  <div class="tool-menu wide" id="category-menu">
-    <div class="menu-head"><span>Category</span></div>
-    <div class="cat-grid" id="category-grid"></div>
-  </div>
+    <section class="dash-panel" id="panel-sheets" hidden>
+      <h1>My Sheets</h1>
+      <p class="dash-sub">Compositions saved to your account from the workspace's Save button (⌘S).</p>
 
-  <!-- Parts menu -->
-  <div class="tool-menu" id="parts-menu">
-    <div class="menu-head">
-      <span>Parts</span>
-      <button class="icon-btn" id="btn-add-part-2" style="width:20px;height:20px;font-size:13px;">+</button>
-    </div>
-    <div id="parts-list" class="parts-list"></div>
-  </div>
-
-  <!-- Marks menu -->
-  <div class="tool-menu wide" id="marks-menu">
-    <div class="menu-section">
-      <div class="menu-label">Articulation</div>
-      <div class="tool-grid">
-        <button class="mark-btn" data-art="staccato"><span>·</span> Staccato <kbd>.</kbd></button>
-        <button class="mark-btn" data-art="accent"><span>&gt;</span> Accent <kbd>,</kbd></button>
-        <button class="mark-btn" data-art="tenuto"><span>–</span> Tenuto <kbd>-</kbd></button>
-        <button class="mark-btn" data-art="fermata"><span>𝄐</span> Fermata <kbd>\</kbd></button>
-        <button class="mark-btn" data-art="trill"><span>tr</span> Trill <kbd>'</kbd></button>
-        <button class="mark-btn" data-insert="tie"><span>⌢</span> Tie <kbd>`</kbd></button>
-        <button class="mark-btn" data-insert="slur" id="btn-slur"><span>⌢</span> Slur <kbd>S</kbd></button>
+      <div class="dash-disclaimer">
+        <strong>Data note:</strong> sheets you save from the workspace are stored
+        in the cloud and tied to your account. Local autosave/browser storage is
+        still just a same-device safety net, not a backup — keep a downloaded
+        copy of anything you can't afford to lose.
       </div>
-    </div>
-    <div class="menu-section">
-      <div class="menu-label">Playing Text</div>
-      <div class="tool-grid">
-        <button class="mark-btn" data-insert="mute-on">con sord.</button>
-        <button class="mark-btn" data-insert="mute-off">senza sord.</button>
-        <button class="mark-btn" data-insert="capo">Capo</button>
-        <button class="mark-btn" data-insert="pedal-down">Ped. down <kbd>Alt+P</kbd></button>
-        <button class="mark-btn" data-insert="pedal-up">Ped. up <kbd>Alt+O</kbd></button>
-        <button class="mark-btn" data-insert="expr">Custom text <kbd>Alt+E</kbd></button>
-      </div>
-    </div>
-    <div class="menu-section">
-      <div class="menu-label">Rhythm Marks</div>
-      <div class="tool-grid">
-        <button class="mark-btn" data-insert="tremolo1">Tremolo 1</button>
-        <button class="mark-btn" data-insert="tremolo2">Tremolo 2</button>
-        <button class="mark-btn" data-insert="tremolo3">Tremolo 3</button>
-        <button class="mark-btn" data-insert="triplet">Triplet <kbd>⇧3</kbd></button>
-      </div>
-    </div>
-  </div>
 
-  <!-- Insert menu -->
-  <div class="tool-menu wide" id="insert-menu">
-    <div class="menu-section">
-      <div class="menu-label">Repeats &amp; Navigation</div>
-      <div class="tool-grid">
-        <button class="mark-btn" data-insert="repeat-start">|: Repeat start <kbd>[</kbd></button>
-        <button class="mark-btn" data-insert="repeat-end">:| Repeat end <kbd>]</kbd></button>
-        <button class="mark-btn" data-insert="segno">§ Segno <kbd>Alt+G</kbd></button>
-        <button class="mark-btn" data-insert="coda">⊕ Coda <kbd>Alt+C</kbd></button>
-        <button class="mark-btn" data-insert="ds-al-coda">D.S. al Coda</button>
-        <button class="mark-btn" data-insert="dc-al-capo">D.C. al Capo</button>
-        <button class="mark-btn" data-insert="ds-al-fine">D.S. al Fine</button>
-        <button class="mark-btn" data-insert="dc-al-fine">D.C. al Fine</button>
-        <button class="mark-btn" data-insert="fine">Fine <kbd>Alt+F</kbd></button>
-      </div>
-    </div>
-    <div class="menu-section">
-      <div class="menu-label">Tempo &amp; Rehearsal</div>
-      <div class="tool-grid">
-        <button class="mark-btn" data-insert="rehearsal">Rehearsal <kbd>R</kbd></button>
-        <button class="mark-btn" data-insert="tempo-text">Tempo text</button>
-        <button class="mark-btn" data-insert="rit">rit.</button>
-        <button class="mark-btn" data-insert="accel">accel.</button>
-        <button class="mark-btn" data-insert="a-tempo">a tempo</button>
-        <button class="mark-btn" data-insert="largo">Largo</button>
-        <button class="mark-btn" data-insert="adagio">Adagio</button>
-        <button class="mark-btn" data-insert="andante">Andante</button>
-        <button class="mark-btn" data-insert="moderato">Moderato</button>
-        <button class="mark-btn" data-insert="allegro">Allegro</button>
-        <button class="mark-btn" data-insert="presto">Presto</button>
-      </div>
-    </div>
-  </div>
-
-  <!-- Score menu -->
-  <div class="tool-menu wide" id="score-menu">
-    <div class="menu-section">
-      <div class="menu-label">Score Attributes</div>
-      <div class="ctrl-row">
-        <label>Time</label>
-        <input id="score-ts" class="sel-sm" type="text" placeholder="4/4" value="4/4" style="width:60px">
-        <button class="btn btn-sm" id="score-global-time">Global</button>
-        <button class="btn btn-sm" id="score-here-time">Here</button>
-      </div>
-      <div class="ctrl-row">
-        <label>Key</label>
-        <select id="score-key" class="sel-sm">
-          <optgroup label="Sharps">
-            <option value="C">C</option><option value="G">G (1♯)</option>
-            <option value="D">D (2♯)</option><option value="A">A (3♯)</option>
-            <option value="E">E (4♯)</option><option value="B">B (5♯)</option>
-            <option value="F#">F♯ (6♯)</option><option value="C#">C♯ (7♯)</option>
-          </optgroup>
-          <optgroup label="Flats">
-            <option value="F">F (1♭)</option><option value="Bb">B♭ (2♭)</option>
-            <option value="Eb">E♭ (3♭)</option><option value="Ab">A♭ (4♭)</option>
-            <option value="Db">D♭ (5♭)</option><option value="Gb">G♭ (6♭)</option>
-            <option value="Cb">C♭ (7♭)</option>
-          </optgroup>
-        </select>
-        <button class="btn btn-sm" id="score-global-key">Global</button>
-        <button class="btn btn-sm" id="score-here-key">Here</button>
-      </div>
-      <div class="ctrl-row">
-        <label>Clef</label>
-        <select id="score-clef" class="sel-sm">
-          <option value="treble">Treble</option>
-          <option value="bass">Bass</option>
-          <option value="alto">Alto</option>
-          <option value="tenor">Tenor</option>
-        </select>
-        <button class="btn btn-sm" id="score-global-clef">Global</button>
-        <button class="btn btn-sm" id="score-here-clef">Here</button>
-      </div>
-      <div class="ctrl-row">
-        <label>TAB</label>
-        <select id="score-tuning" class="sel-sm">
-          <option value="guitar">Guitar standard</option>
-          <option value="dropD">Drop D</option>
-          <option value="ukulele">Ukulele standard</option>
-        </select>
-        <input id="score-capo" class="sel-sm" type="number" min="0" max="20" value="0" style="width:54px">
-        <button class="btn btn-sm" id="score-apply-tab">Apply</button>
-      </div>
-    </div>
-  </div>
-
-  <!-- Dynamics menu (shown separately) -->
-  <div class="tool-menu" id="dynamics-menu" style="min-width:280px;">
-    <div class="menu-section">
-      <div class="menu-label">Dynamics</div>
-      <div class="dyn-grid">
-        <button class="dyn-btn" data-dyn="pppp"><em>pppp</em></button>
-        <button class="dyn-btn" data-dyn="ppp"><em>ppp</em></button>
-        <button class="dyn-btn" data-dyn="pp"><em>pp</em></button>
-        <button class="dyn-btn" data-dyn="p"><em>p</em></button>
-        <button class="dyn-btn" data-dyn="mp"><em>mp</em></button>
-        <button class="dyn-btn active" data-dyn="mf"><em>mf</em></button>
-        <button class="dyn-btn" data-dyn="f"><em>f</em></button>
-        <button class="dyn-btn" data-dyn="ff"><em>ff</em></button>
-        <button class="dyn-btn" data-dyn="fff"><em>fff</em></button>
-        <button class="dyn-btn" data-dyn="ffff"><em>ffff</em></button>
-        <button class="dyn-btn" data-dyn="sfz"><em>sfz</em></button>
-        <button class="dyn-btn" data-dyn="sfp"><em>sfp</em></button>
-        <button class="dyn-btn" data-dyn="fp"><em>fp</em></button>
-        <button class="dyn-btn" data-dyn="fz"><em>fz</em></button>
-        <button class="dyn-btn" data-dyn="rf"><em>rf</em></button>
-        <button class="dyn-btn" data-dyn="rfz"><em>rfz</em></button>
-      </div>
-    </div>
-  </div>
-
-  <!-- Staff / paper area -->
-  <div class="staff-area" id="staff-area">
-    <div class="paper" id="paper">
-      <canvas id="staff-canvas"></canvas>
-    </div>
-  </div>
-
-</div><!-- /workspace -->
-
-<!-- ── Help bar ─────────────────────────────────────────────────── -->
-<div class="help-bar">
-  <div class="hg"><span class="hl">Notes</span><div class="hi"><kbd>A</kbd>–<kbd>G</kbd></div><div class="hi"><kbd>#</kbd>+note ♯</div><div class="hi"><kbd>-</kbd>+note ♭</div><div class="hi"><kbd>=</kbd>+note ♮</div><div class="hi"><kbd>Space</kbd> rest</div><div class="hi"><kbd>⌫</kbd> del</div></div>
-  <div class="hg"><span class="hl">Pitch</span><div class="hi"><kbd>↑↓</kbd> half-step</div><div class="hi"><kbd>←→</kbd> cursor</div></div>
-  <div class="hg"><span class="hl">Octave</span><div class="hi"><kbd>⇧↑↓</kbd> ±oct</div><div class="hi"><kbd>⌘↑↓</kbd> ±oct</div></div>
-  <div class="hg"><span class="hl">Duration</span><div class="hi"><kbd>4</kbd>=♩ <kbd>5</kbd>=♩· <kbd>6</kbd>=𝅗𝅥</div><div class="hi"><kbd>3</kbd>=♪ <kbd>2</kbd>=𝅘𝅥𝅯 <kbd>1</kbd>=𝅘𝅥𝅰</div><div class="hi"><kbd>7</kbd>=triplet</div><div class="hi"><kbd>N</kbd> cycle</div><div class="hi"><kbd>⇧D</kbd> dot</div></div>
-  <div class="hg"><span class="hl">Marks</span><div class="hi"><kbd>.</kbd> stacc</div><div class="hi"><kbd>,</kbd> accent</div><div class="hi"><kbd>\</kbd> fermata</div><div class="hi"><kbd>`</kbd> tie</div><div class="hi"><kbd>S</kbd> slur</div></div>
-  <div class="hg"><span class="hl">Edit</span><div class="hi"><kbd>⌘Z</kbd> undo</div><div class="hi"><kbd>⌘S</kbd> save</div><div class="hi"><kbd>F5</kbd> play</div><div class="hi"><a href="shortcuts.html" target="_blank" style="color:inherit;opacity:.7">Full ref ↗</a></div></div>
-</div>
-
-<!-- ── Modals ─────────────────────────────────────────────────── -->
-
-<!-- Key change -->
-<div class="modal-overlay" id="modal-key">
-  <div class="modal">
-    <h3>Insert Key Change</h3>
-    <div class="modal-row">
-      <label>Key</label>
-      <select id="modal-key-sel">
-        <optgroup label="Sharps">
-          <option value="C">C major</option><option value="G">G major (1♯)</option>
-          <option value="D">D major (2♯)</option><option value="A">A major (3♯)</option>
-          <option value="E">E major (4♯)</option><option value="B">B major (5♯)</option>
-          <option value="F#">F♯ major (6♯)</option><option value="C#">C♯ major (7♯)</option>
-        </optgroup>
-        <optgroup label="Flats">
-          <option value="F">F major (1♭)</option><option value="Bb">B♭ major (2♭)</option>
-          <option value="Eb">E♭ major (3♭)</option><option value="Ab">A♭ major (4♭)</option>
-          <option value="Db">D♭ major (5♭)</option><option value="Gb">G♭ major (6♭)</option>
-          <option value="Cb">C♭ major (7♭)</option>
-        </optgroup>
-      </select>
-    </div>
-    <div class="modal-actions">
-      <button class="btn" data-close-modal="modal-key">Cancel</button>
-      <button class="btn btn-primary" id="confirm-key">Insert</button>
-    </div>
-  </div>
-</div>
-
-<!-- Time sig -->
-<div class="modal-overlay" id="modal-timesig">
-  <div class="modal">
-    <h3>Insert Time Signature</h3>
-    <div class="modal-row">
-      <label>Sig</label>
-      <input id="modal-ts-input" type="text" placeholder="e.g. 5/8">
-    </div>
-    <p class="modal-hint">Any metre: 4/4, 3/4, 6/8, 5/4, 7/8…</p>
-    <div class="modal-actions">
-      <button class="btn" data-close-modal="modal-timesig">Cancel</button>
-      <button class="btn btn-primary" id="confirm-timesig">Insert</button>
-    </div>
-  </div>
-</div>
-
-<!-- Clef -->
-<div class="modal-overlay" id="modal-clef">
-  <div class="modal">
-    <h3>Insert Clef Change</h3>
-    <div class="modal-row">
-      <label>Clef</label>
-      <select id="modal-clef-sel">
-        <option value="treble">Treble (G clef)</option>
-        <option value="bass">Bass (F clef)</option>
-        <option value="alto">Alto (C clef, 3rd line)</option>
-        <option value="tenor">Tenor (C clef, 4th line)</option>
-      </select>
-    </div>
-    <div class="modal-actions">
-      <button class="btn" data-close-modal="modal-clef">Cancel</button>
-      <button class="btn btn-primary" id="confirm-clef">Insert</button>
-    </div>
-  </div>
-</div>
-
-<!-- Dynamic -->
-<div class="modal-overlay" id="modal-dynamic">
-  <div class="modal">
-    <h3>Insert Dynamic</h3>
-    <div class="modal-row">
-      <label>Dynamic</label>
-      <select id="modal-dyn-sel">
-        <option>pppp</option><option>ppp</option><option>pp</option><option>p</option>
-        <option>mp</option><option selected>mf</option><option>f</option>
-        <option>ff</option><option>fff</option><option>ffff</option>
-        <option>sfz</option><option>sfp</option><option>fp</option>
-        <option>fz</option><option>rf</option><option>rfz</option>
-      </select>
-    </div>
-    <div class="modal-actions">
-      <button class="btn" data-close-modal="modal-dynamic">Cancel</button>
-      <button class="btn btn-primary" id="confirm-dynamic">Insert</button>
-    </div>
-  </div>
-</div>
-
-<!-- Rehearsal -->
-<div class="modal-overlay" id="modal-rehearsal">
-  <div class="modal">
-    <h3>Insert Rehearsal Mark</h3>
-    <div class="modal-row">
-      <label>Label</label>
-      <input id="modal-rehearsal-input" type="text" placeholder="A, B, 1, 2…" maxlength="4">
-    </div>
-    <div class="modal-actions">
-      <button class="btn" data-close-modal="modal-rehearsal">Cancel</button>
-      <button class="btn btn-primary" id="confirm-rehearsal">Insert</button>
-    </div>
-  </div>
-</div>
-
-<!-- Tempo -->
-<div class="modal-overlay" id="modal-tempo">
-  <div class="modal">
-    <h3>Insert Tempo Marking</h3>
-    <div class="modal-row">
-      <label>Text</label>
-      <input id="modal-tempo-input" type="text" placeholder="e.g. Allegro, ♩=120">
-    </div>
-    <div class="modal-actions">
-      <button class="btn" data-close-modal="modal-tempo">Cancel</button>
-      <button class="btn btn-primary" id="confirm-tempo">Insert</button>
-    </div>
-  </div>
-</div>
-
-<!-- Expression -->
-<div class="modal-overlay" id="modal-expression">
-  <div class="modal">
-    <h3>Insert Expression Text</h3>
-    <div class="modal-row">
-      <label>Text</label>
-      <input id="modal-expr-input" type="text" placeholder="e.g. dolce, con fuoco">
-    </div>
-    <div class="modal-actions">
-      <button class="btn" data-close-modal="modal-expression">Cancel</button>
-      <button class="btn btn-primary" id="confirm-expr">Insert</button>
-    </div>
-  </div>
-</div>
-
-<!-- Capo -->
-<div class="modal-overlay" id="modal-capo">
-  <div class="modal">
-    <h3>Insert Capo Marking</h3>
-    <div class="modal-row">
-      <label>Fret</label>
-      <input id="modal-capo-input" type="number" min="0" max="20" placeholder="e.g. 3">
-    </div>
-    <div class="modal-actions">
-      <button class="btn" data-close-modal="modal-capo">Cancel</button>
-      <button class="btn btn-primary" id="confirm-capo">Insert</button>
-    </div>
-  </div>
-</div>
-
-<!-- Add Part -->
-<div class="modal-overlay" id="modal-addpart">
-  <div class="modal">
-    <h3>Add Part</h3>
-    <div class="modal-row">
-      <label>Name</label>
-      <input id="modal-addpart-name" type="text" placeholder="e.g. 2nd Violin" maxlength="40" spellcheck="false" autocomplete="off">
-    </div>
-    <div class="modal-row" style="align-items:flex-start">
-      <label style="padding-top:2px">Category</label>
-      <div class="cat-grid" id="addpart-cat-grid" style="flex:1"></div>
-    </div>
-    <div class="modal-row">
-      <label>Clef</label>
-      <select id="modal-addpart-clef">
-        <option value="treble">Treble</option>
-        <option value="bass">Bass</option>
-        <option value="alto">Alto</option>
-        <option value="tenor">Tenor</option>
-      </select>
-    </div>
-    <p class="modal-hint">Category picks the physics model for playback; clef and name are independent — write a low bowed-strings part in bass clef and call it whatever you like.</p>
-    <div class="modal-actions">
-      <button class="btn" data-close-modal="modal-addpart">Cancel</button>
-      <button class="btn btn-primary" id="confirm-addpart">Add Part</button>
-    </div>
-  </div>
-</div>
-
-<!-- Instrument Marks -->
-<div class="modal-overlay" id="modal-instmarks">
-  <div class="modal" style="min-width:320px;max-height:70vh;overflow-y:auto;">
-    <h3 id="instmarks-title">Instrument Marks</h3>
-    <div id="instmarks-body"></div>
-    <div class="modal-actions">
-      <button class="btn" data-close-modal="modal-instmarks">Close</button>
-    </div>
-  </div>
-</div>
-
-<!-- Hotkeys -->
-<div class="modal-overlay" id="modal-hotkeys">
-  <div class="modal" style="max-width:640px;max-height:80vh;overflow-y:auto;">
-    <h3>Keyboard Shortcuts <a href="shortcuts.html" target="_blank" style="font-size:12px;font-weight:normal;color:var(--ink-muted);margin-left:10px;">Full reference ↗</a></h3>
-    <div class="hk-grid">
-      <div class="hk-section">
-        <h4>Notes</h4>
-        <div class="hk-row"><kbd>A</kbd>–<kbd>G</kbd><span>Insert note (key signature applied automatically)</span></div>
-        <div class="hk-row"><kbd>#</kbd> then note<span>Force sharp (e.g. # then E → E♯)</span></div>
-        <div class="hk-row"><kbd>-</kbd> then note<span>Force flat (e.g. - then E → E♭)</span></div>
-        <div class="hk-row"><kbd>=</kbd> then note<span>Force natural (e.g. = then E → E♮)</span></div>
-        <div class="hk-row"><kbd>Space</kbd><span>Insert rest</span></div>
-        <div class="hk-row"><kbd>⌫</kbd><span>Delete note/event</span></div>
-        <h4>Pitch &amp; Cursor</h4>
-        <div class="hk-row"><kbd>↑</kbd> <kbd>↓</kbd><span>Raise / lower by chromatic half-step</span></div>
-        <div class="hk-row" style="font-size:10.5px;color:var(--ink-muted);padding-left:6px;line-height:1.6">
-          Enharmonic spelling follows key signature.<br>
-          E.g. in E♭ major: ↓ from E gives E♭, not D♯.
-        </div>
-        <div class="hk-row"><kbd>←</kbd> <kbd>→</kbd><span>Move cursor</span></div>
-        <h4>Octave</h4>
-        <div class="hk-row"><kbd>⇧↑</kbd> <kbd>⇧↓</kbd><span>Octave up / down</span></div>
-        <div class="hk-row"><kbd>⌘↑</kbd> <kbd>⌘↓</kbd><span>Octave up / down (Ctrl on Windows)</span></div>
-        <div class="hk-row" style="font-size:10.5px;color:var(--ink-muted);padding-left:6px;line-height:1.6">
-          Smart octave: new notes auto-pick the octave closest to the previous note.
+      <div class="dash-empty" id="sheets-empty">
+        <div class="dash-empty-icon">♪</div>
+        <div class="dash-empty-title" id="sheets-empty-title">Loading your sheets…</div>
+        <div class="dash-empty-desc" id="sheets-empty-desc">
+          Hang tight while we fetch your saved compositions.
         </div>
       </div>
-      <div class="hk-section">
-        <h4>Duration — plain number keys</h4>
-        <div class="hk-row"><kbd>6</kbd><span>Whole note</span></div>
-        <div class="hk-row"><kbd>5</kbd><span>Half note</span></div>
-        <div class="hk-row"><kbd>4</kbd><span>Quarter note</span></div>
-        <div class="hk-row"><kbd>3</kbd><span>Eighth note</span></div>
-        <div class="hk-row"><kbd>2</kbd><span>Sixteenth note</span></div>
-        <div class="hk-row"><kbd>1</kbd><span>Thirty-second note</span></div>
-        <div class="hk-row"><kbd>7</kbd><span>Quarter triplet</span></div>
-        <div class="hk-row"><kbd>N</kbd><span>Cycle to next shorter duration</span></div>
-        <div class="hk-row"><kbd>⇧N</kbd><span>Cycle to next longer duration</span></div>
-        <div class="hk-row"><kbd>⇧D</kbd><span>Toggle dotted</span></div>
-        <h4>Articulations</h4>
-        <div class="hk-row"><kbd>.</kbd><span>Staccato</span></div>
-        <div class="hk-row"><kbd>,</kbd><span>Accent</span></div>
-        <div class="hk-row"><kbd>;</kbd><span>Tenuto</span></div>
-        <div class="hk-row"><kbd>\</kbd><span>Fermata</span></div>
-        <div class="hk-row"><kbd>`</kbd><span>Tie</span></div>
-        <div class="hk-row"><kbd>S</kbd><span>Slur (click 2 notes)</span></div>
-        <div class="hk-row"><kbd>'</kbd><span>Trill</span></div>
-        <h4>Insert</h4>
-        <div class="hk-row"><kbd>K</kbd><span>Key signature</span></div>
-        <div class="hk-row"><kbd>T</kbd><span>Time signature</span></div>
-        <div class="hk-row"><kbd>L</kbd><span>Clef change</span></div>
-        <div class="hk-row"><kbd>M</kbd><span>Dynamic</span></div>
-        <div class="hk-row"><kbd>R</kbd><span>Rehearsal mark</span></div>
-        <div class="hk-row"><kbd>[</kbd> <kbd>]</kbd><span>Repeat barlines</span></div>
-        <div class="hk-row"><kbd>Alt+1–8</kbd><span>Quick dynamics pp · p · mp · mf · f · ff · fff · sfz</span></div>
-        <h4>Edit / Global</h4>
-        <div class="hk-row"><kbd>⌘Z</kbd> / <kbd>⌘⇧Z</kbd><span>Undo / Redo</span></div>
-        <div class="hk-row"><kbd>⌘S</kbd><span>Save</span></div>
-        <div class="hk-row"><kbd>Tab</kbd><span>Switch to next part</span></div>
-        <div class="hk-row"><kbd>F5</kbd><span>Play / Stop</span></div>
-        <div class="hk-row"><kbd>Esc</kbd><span>Close menus / cancel prefix</span></div>
-      </div>
-    </div>
-    <div class="modal-actions">
-      <button class="btn" data-close-modal="modal-hotkeys">Close</button>
-      <a href="shortcuts.html" target="_blank" class="btn btn-primary" style="text-decoration:none">Open full reference</a>
-    </div>
-  </div>
+
+      <div class="dash-sheet-list" id="sheets-list" hidden></div>
+    </section>
+
+  </main>
 </div>
 
-<!-- Toast -->
-<div class="toast" id="toast"></div>
-
-<!-- VexFlow — pinned version. engine.js resolves window.Vex.Flow (or
-     window.VexFlow as a fallback) — if you bump this version and notation
-     stops rendering, check the console warning from engine.js's _vf(). -->
-<script src="https://cdn.jsdelivr.net/npm/vexflow@4.2.2/build/cjs/vexflow.js" crossorigin="anonymous"></script>
-<script src="js/engine.js"></script>
-<script src="js/playback.js"></script>
-<script src="js/musicxml.js"></script>
+<script src="js/auth.js"></script>
 <script src="js/sheets-api.js"></script>
-<script src="js/app.js"></script>
-
 <script>
-  // Wire the btn-add-part-2 in parts menu
-  document.getElementById('btn-add-part-2').addEventListener('click', () => openAddPartModal());
+  const user = window.RymAuth.getCurrentUser();
+  if (!user) {
+    window.location.replace('login.html');
+  } else {
+    document.getElementById('user-name').textContent = user.displayName;
+    document.getElementById('user-avatar').textContent =
+      (user.displayName || '?').trim().charAt(0).toUpperCase();
+    document.getElementById('welcome-name').textContent = ', ' + user.displayName;
+  }
 
-  // Register PWA service worker
+  document.getElementById('btn-signout').addEventListener('click', () => {
+    window.RymAuth.signOut();
+    window.location.href = 'login.html';
+  });
+
+  // ── Tab switching ─────────────────────────────────────────────────
+  const tabs   = document.querySelectorAll('.dash-tab');
+  const panels = { overview: document.getElementById('panel-overview'), sheets: document.getElementById('panel-sheets') };
+  let sheetsLoadedOnce = false;
+
+  function goToTab(name) {
+    tabs.forEach(t => t.classList.toggle('active', t.dataset.tab === name));
+    Object.keys(panels).forEach(k => { panels[k].hidden = k !== name; });
+    // Lazily fetch the first time the tab is actually opened, and silently
+    // refresh on every subsequent visit so a sheet saved in another tab
+    // (or just now, in the editor) shows up without a full page reload.
+    if (name === 'sheets') renderSheets();
+  }
+
+  function escHtml(value) {
+    return String(value)
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;');
+  }
+
+  tabs.forEach(tab => tab.addEventListener('click', () => goToTab(tab.dataset.tab)));
+  document.querySelectorAll('[data-goto-tab]').forEach(el => {
+    el.addEventListener('click', () => goToTab(el.dataset.gotoTab));
+  });
+
+  const emptyState     = document.getElementById('sheets-empty');
+  const emptyTitleEl   = document.getElementById('sheets-empty-title');
+  const emptyDescEl    = document.getElementById('sheets-empty-desc');
+  const sheetsList     = document.getElementById('sheets-list');
+
+  function showEmpty(title, desc) {
+    emptyState.hidden = false;
+    sheetsList.hidden = true;
+    emptyTitleEl.textContent = title;
+    emptyDescEl.textContent  = desc;
+  }
+
+  async function renderSheets() {
+    const api = window.RymSheets;
+    if (!api) return;
+
+    // Only show the "Loading…" flash on the very first fetch — a background
+    // refresh (tab revisit) shouldn't blank out an already-populated list.
+    if (!sheetsLoadedOnce) {
+      showEmpty('Loading your sheets…', 'Hang tight while we fetch your saved compositions.');
+    }
+
+    try {
+      const sheets = await api.listSheets();
+      sheetsLoadedOnce = true;
+
+      if (!sheets.length) {
+        showEmpty(
+          'Nothing here yet',
+          'Save a composition from the workspace (Save button or ⌘S while signed in) and it will show up here.'
+        );
+        return;
+      }
+
+      emptyState.hidden = true;
+      sheetsList.hidden = false;
+      sheetsList.innerHTML = sheets.map(sheet => `
+        <article class="sheet-row">
+          <div class="sheet-meta">
+            <div class="sheet-title">${escHtml(sheet.title || 'Untitled composition')}</div>
+            <div class="sheet-sub">
+              Updated ${new Date(sheet.updatedAt).toLocaleString()}
+            </div>
+          </div>
+          <div class="sheet-actions">
+            <a class="btn btn-sm" href="editor.html?sheet=${encodeURIComponent(sheet.id)}">Open</a>
+            <button class="btn btn-sm" data-sheet-delete="${sheet.id}">Delete</button>
+          </div>
+        </article>
+      `).join('');
+
+      sheetsList.querySelectorAll('[data-sheet-delete]').forEach(btn => {
+        btn.addEventListener('click', async () => {
+          if (!confirm('Delete this sheet from cloud storage?')) return;
+          btn.disabled = true;
+          btn.textContent = 'Deleting…';
+          try {
+            await api.deleteSheet(btn.dataset.sheetDelete);
+            await renderSheets();
+          } catch (err) {
+            btn.disabled = false;
+            btn.textContent = 'Delete';
+            alert('Could not delete this sheet. Try again in a moment.');
+          }
+        });
+      });
+    } catch (err) {
+      sheetsLoadedOnce = true;
+      showEmpty(
+        'Cloud storage unavailable',
+        'The dashboard cannot reach the sheet API right now. You can still use local Save/Load in the editor.'
+      );
+    }
+  }
+
+  // Overview is the default tab, so fetch sheets in the background right
+  // away too — by the time someone clicks "My Sheets" the list is usually
+  // already there instead of showing the loading flash.
+  renderSheets();
+
+  // Register PWA service worker (same as editor.html)
   if ('serviceWorker' in navigator) {
     window.addEventListener('load', () => {
       navigator.serviceWorker.register('sw.js').catch(() => {});
