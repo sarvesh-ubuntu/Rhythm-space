@@ -6,7 +6,7 @@
  * Chrome's mysterious net::ERR_FAILED navigation errors.
  *
  * ─── Navigation handling (fixed) ─────────────────────────────────────────
- * Real page navigations (index.html / login.html / dashboard.html) are no
+ * Real page navigations (index.html / login.html / editor.html) are no
  * longer routed through the cache-populating handleRequest() path. This
  * app is three separate documents, not a single-page app shell, so there
  * was no benefit to caching navigation responses on every load — and doing
@@ -36,7 +36,7 @@ const CACHE_NAME = 'rymspace-shell-v3';
 const APP_SHELL = [
   './index.html',
   './login.html',
-  './dashboard.html',
+  './editor.html',
   './css/style.css',
   './css/auth.css',
   './css/dashboard.css',
@@ -101,7 +101,7 @@ self.addEventListener('fetch', (event) => {
   }
 
   // Let real page navigations go straight to the network. This app is
-  // multiple separate documents (index/login/dashboard), not a single SPA
+  // multiple separate documents (index/login/editor), not a single SPA
   // shell being reused for client-side routing, so there's no benefit to
   // routing navigations through the cache-write path — and doing so races
   // the browser's own navigation commit: cloning + cache.put()'ing a
@@ -124,7 +124,7 @@ async function handleNavigate(request) {
     return await fetch(request);
   } catch (err) {
     // Offline: prefer the cached copy of the exact page the user was
-    // trying to reach (e.g. dashboard.html) so they aren't bounced to
+    // trying to reach (e.g. editor.html) so they aren't bounced to
     // index.html mid-session. Fall back to the shell's index.html only
     // if that specific page was never cached, and finally to a plain
     // 503 so respondWith() is never handed undefined.
