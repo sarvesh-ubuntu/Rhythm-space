@@ -214,9 +214,14 @@
   padding: 3px 9px;
 }
 
-/* Disabled-feeling card (My Sheets on the overview grid) */
-.dash-card-dim { opacity: 0.86; }
-.dash-card-dim .dash-card-icon { color: var(--ink-muted); }
+/* "Live" badge — same shape as the generic badge above, but tinted with
+   the accent color so a genuinely-working feature (My Sheets, once its
+   backend is deployed) reads as active rather than merely present. */
+.dash-badge-live {
+  color: var(--accent);
+  background: var(--accent-dim);
+  border-color: var(--accent);
+}
 
 /* ── Empty state (My Sheets panel) ───────────────────────────────── */
 .dash-empty {
@@ -281,11 +286,15 @@
   border-radius: 4px;
   background: rgba(255,255,255,0.2);
 }
+.sheet-meta { min-width: 0; }
 .sheet-title {
   font-family: var(--font-display);
   font-size: 14px;
   font-weight: 600;
   color: var(--ink-2);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .sheet-sub {
   margin-top: 3px;
