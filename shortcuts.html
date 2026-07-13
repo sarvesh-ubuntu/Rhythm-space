@@ -1,0 +1,284 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="theme-color" content="#1a1207">
+<title>Rhythm space — Full Shortcut Reference</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=EB+Garamond:ital,wght@0,400;0,500;0,600;1,400&family=Cinzel:wght@400;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="css/style.css">
+<style>
+  /* style.css sets html,body{overflow:hidden;height:100%} for the app shell's
+     fixed-panel layout — this is a plain scrolling document, so override.
+     Background matches the dark canvas the login card / dashboard cards /
+     note-editor "paper" all sit on, instead of the flat linen chrome color,
+     so this page reads as one more parchment surface in the same room. */
+  html, body { height: auto; overflow: auto; }
+  body {
+    background:
+      radial-gradient(ellipse at 50% 0%,   rgba(156,107,46,0.14) 0%, transparent 55%),
+      radial-gradient(ellipse at 50% 100%, rgba(55,40,15,0.20) 0%, transparent 60%),
+      #BEB09A;
+    padding: 40px 20px 80px;
+  }
+  ::-webkit-scrollbar-track { background: #BEB09A; }
+
+  .ref-wrap {
+    max-width: 960px;
+    margin: 0 auto;
+  }
+
+  /* ── The page itself, styled as an aged leaf of parchment — same
+     construction as .auth-card / .dash-card / .paper: a soft radial
+     vignette over the base parchment color, a bronze top rule, and a
+     multiply-blended foxing layer for age spots. ── */
+  .doc-card {
+    position: relative;
+    background:
+      radial-gradient(ellipse at 50% 50%, transparent 60%, rgba(160,120,60,0.12) 100%),
+      #f0e4c6;
+    border: 1px solid var(--border-strong);
+    border-top: 3px solid var(--accent);
+    border-radius: 4px;
+    padding: 40px 44px 60px;
+    box-shadow:
+      0 16px 48px rgba(0,0,0,0.30),
+      0 4px 12px rgba(0,0,0,0.16),
+      inset 0 0 40px rgba(100,70,20,0.08);
+    overflow: hidden;
+  }
+  .doc-card::before {
+    content: '';
+    position: absolute;
+    inset: 0;
+    background:
+      radial-gradient(circle at 6% 8%,   rgba(120,80,20,0.10) 0%, rgba(120,80,20,0.04) 22%, transparent 40%),
+      radial-gradient(circle at 94% 6%,  rgba(100,65,15,0.09) 0%, rgba(100,65,15,0.03) 20%, transparent 38%),
+      radial-gradient(circle at 4% 95%,  rgba(110,75,18,0.10) 0%, rgba(110,75,18,0.03) 20%, transparent 38%),
+      radial-gradient(circle at 96% 92%, rgba(130,90,22,0.10) 0%, rgba(130,90,22,0.04) 22%, transparent 40%);
+    mix-blend-mode: multiply;
+    pointer-events: none;
+  }
+  .doc-card > * { position: relative; }
+
+  .ref-header {
+    margin-bottom: 28px;
+    padding-bottom: 16px;
+    border-bottom: 1px solid var(--border-strong);
+  }
+  .ref-title {
+    font-family: var(--font-display);
+    font-size: 22px;
+    font-weight: 600;
+    color: var(--accent);
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+  }
+  .ref-sub {
+    font-size: 13px;
+    color: var(--ink-muted);
+    font-style: italic;
+    margin-top: 6px;
+  }
+  .ref-back { font-size: 12px; }
+  .ref-back a { color: var(--accent); text-decoration: none; }
+  .ref-back a:hover { text-decoration: underline; color: var(--accent-bright); }
+
+  .ref-section { margin-bottom: 32px; }
+  .ref-section h2 {
+    font-family: var(--font-display);
+    font-size: 13px;
+    color: var(--accent);
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+    margin-bottom: 10px;
+    padding-bottom: 6px;
+    border-bottom: 1px solid var(--border-mid);
+  }
+  .ref-note {
+    font-size: 12px;
+    color: var(--ink-muted);
+    font-style: italic;
+    margin: -4px 0 12px;
+  }
+  .hk-row span { flex: 1; }
+
+  /* The global kbd style (in css/style.css) is tuned for the dark header/
+     help-bar chrome — pale text on a faint white chip. On this page's
+     light parchment card that reads as low-contrast, near-invisible key
+     caps, so it's overridden here for a light surface: ink-colored text
+     on a warm bronze-tinted chip, matching the .btn/.sel treatment used
+     elsewhere on light chrome. */
+  .doc-card kbd {
+    background: var(--surface-2);
+    border: 1px solid var(--border-mid);
+    border-bottom-width: 2px;
+    border-radius: 2px;
+    padding: 0 4px;
+    font-family: var(--font-mono);
+    font-size: 10px;
+    color: var(--ink-2);
+    box-shadow: inset 0 -1px 0 rgba(90,68,32,0.15);
+  }
+</style>
+</head>
+<body>
+<div class="ref-wrap">
+<div class="doc-card">
+
+  <div class="ref-header">
+    <div class="ref-title">Rhythm space <em style="font-family:var(--font);font-style:italic;font-weight:400;font-size:14px;color:var(--ink-muted);text-transform:none;letter-spacing:0;">— full shortcut reference</em></div>
+    <div class="ref-sub">Every keyboard shortcut and instrument-specific mark, in one place.</div>
+    <div class="ref-back">← <a href="javascript:window.close()">Close this tab</a></div>
+  </div>
+
+  <div class="hk-grid">
+    <div>
+
+      <div class="ref-section">
+        <h2>Notes</h2>
+        <div class="hk-row"><kbd>A</kbd>–<kbd>G</kbd><span>Insert note (key signature applied automatically)</span></div>
+        <div class="hk-row"><kbd>#</kbd> then note<span>Force sharp (e.g. # then E → E♯)</span></div>
+        <div class="hk-row"><kbd>-</kbd> then note<span>Force flat (e.g. - then E → E♭)</span></div>
+        <div class="hk-row"><kbd>=</kbd> then note<span>Force natural (e.g. = then E → E♮)</span></div>
+        <div class="hk-row"><kbd>Space</kbd><span>Insert rest</span></div>
+        <div class="hk-row"><kbd>⌫</kbd> / <kbd>Delete</kbd><span>Delete note/event before cursor</span></div>
+      </div>
+
+      <div class="ref-section">
+        <h2>Pitch &amp; Cursor</h2>
+        <div class="hk-row"><kbd>↑</kbd> <kbd>↓</kbd><span>Raise / lower by chromatic half-step</span></div>
+        <div class="ref-note">Enharmonic spelling follows the key signature — e.g. in E♭ major, ↓ from E gives E♭, not D♯.</div>
+        <div class="hk-row"><kbd>←</kbd> <kbd>→</kbd><span>Move cursor</span></div>
+      </div>
+
+      <div class="ref-section">
+        <h2>Octave</h2>
+        <div class="hk-row"><kbd>⇧↑</kbd> <kbd>⇧↓</kbd><span>Octave up / down</span></div>
+        <div class="hk-row"><kbd>⌘↑</kbd> <kbd>⌘↓</kbd><span>Octave up / down (Ctrl on Windows)</span></div>
+        <div class="ref-note">Smart octave: new notes auto-pick the octave closest to the previous note.</div>
+      </div>
+
+      <div class="ref-section">
+        <h2>Duration — number keys</h2>
+        <div class="hk-row"><kbd>1</kbd><span>Thirty-second note</span></div>
+        <div class="hk-row"><kbd>2</kbd><span>Sixteenth note</span></div>
+        <div class="hk-row"><kbd>3</kbd><span>Eighth note</span></div>
+        <div class="hk-row"><kbd>4</kbd><span>Quarter note</span></div>
+        <div class="hk-row"><kbd>5</kbd><span>Half note</span></div>
+        <div class="hk-row"><kbd>6</kbd><span>Whole note</span></div>
+        <div class="hk-row"><kbd>7</kbd><span>Quarter triplet</span></div>
+        <div class="hk-row"><kbd>N</kbd><span>Cycle to next shorter duration</span></div>
+        <div class="hk-row"><kbd>⇧N</kbd><span>Cycle to next longer duration</span></div>
+        <div class="hk-row"><kbd>⇧D</kbd><span>Toggle dotted</span></div>
+      </div>
+
+      <div class="ref-section">
+        <h2>Articulations &amp; Spans</h2>
+        <div class="hk-row"><kbd>.</kbd><span>Staccato</span></div>
+        <div class="hk-row"><kbd>,</kbd><span>Accent</span></div>
+        <div class="hk-row"><kbd>;</kbd><span>Tenuto</span></div>
+        <div class="hk-row"><kbd>\</kbd><span>Fermata</span></div>
+        <div class="hk-row"><kbd>'</kbd><span>Trill</span></div>
+        <div class="hk-row"><kbd>`</kbd><span>Tie</span></div>
+        <div class="hk-row"><kbd>S</kbd><span>Slur mode (click first note, then last note)</span></div>
+        <div class="hk-row"><kbd>⇧&gt;</kbd><span>Toggle staccato mode (all new notes get staccato)</span></div>
+      </div>
+
+    </div>
+    <div>
+
+      <div class="ref-section">
+        <h2>Score Inserts</h2>
+        <div class="hk-row"><kbd>K</kbd><span>Key signature change</span></div>
+        <div class="hk-row"><kbd>T</kbd><span>Time signature change</span></div>
+        <div class="hk-row"><kbd>L</kbd><span>Clef change</span></div>
+        <div class="hk-row"><kbd>M</kbd><span>Dynamic marking</span></div>
+        <div class="hk-row"><kbd>R</kbd><span>Rehearsal mark</span></div>
+        <div class="hk-row"><kbd>[</kbd> <kbd>]</kbd><span>Repeat start / end barlines</span></div>
+      </div>
+
+      <div class="ref-section">
+        <h2>Quick Dynamics (Alt+number)</h2>
+        <p class="ref-note">Alt+1–8 covers the eight dynamics you reach for most. pppp / ppp / ffff are still in the Dynamics menu.</p>
+        <div class="hk-row"><kbd>Alt+1</kbd><span>pp</span></div>
+        <div class="hk-row"><kbd>Alt+2</kbd><span>p</span></div>
+        <div class="hk-row"><kbd>Alt+3</kbd><span>mp</span></div>
+        <div class="hk-row"><kbd>Alt+4</kbd><span>mf  ← default</span></div>
+        <div class="hk-row"><kbd>Alt+5</kbd><span>f</span></div>
+        <div class="hk-row"><kbd>Alt+6</kbd><span>ff</span></div>
+        <div class="hk-row"><kbd>Alt+7</kbd><span>fff</span></div>
+        <div class="hk-row"><kbd>Alt+8</kbd><span>sfz</span></div>
+      </div>
+
+      <div class="ref-section">
+        <h2>Playing Text &amp; Navigation (Alt)</h2>
+        <div class="hk-row"><kbd>Alt+P</kbd><span>Pedal down</span></div>
+        <div class="hk-row"><kbd>Alt+O</kbd><span>Pedal up</span></div>
+        <div class="hk-row"><kbd>Alt+U</kbd><span>con sord. (mute on)</span></div>
+        <div class="hk-row"><kbd>Alt+N</kbd><span>senza sord. (mute off)</span></div>
+        <div class="hk-row"><kbd>Alt+E</kbd><span>Custom expression text</span></div>
+        <div class="hk-row"><kbd>Alt+G</kbd><span>Segno (§)</span></div>
+        <div class="hk-row"><kbd>Alt+C</kbd><span>Coda (⊕)</span></div>
+        <div class="hk-row"><kbd>Alt+F</kbd><span>Fine</span></div>
+      </div>
+
+      <div class="ref-section">
+        <h2>Edit / Global</h2>
+        <div class="hk-row"><kbd>⌘Z</kbd> / <kbd>⌘⇧Z</kbd><span>Undo / Redo (Ctrl on Windows)</span></div>
+        <div class="hk-row"><kbd>⌘S</kbd><span>Save</span></div>
+        <div class="hk-row"><kbd>Tab</kbd><span>Switch to next part</span></div>
+        <div class="hk-row"><kbd>F5</kbd><span>Play / Stop</span></div>
+        <div class="hk-row"><kbd>Esc</kbd><span>Close menus / cancel accidental prefix</span></div>
+      </div>
+
+      <div class="ref-section">
+        <h2>Menu-only (no hotkey)</h2>
+        <div class="ref-note">Open via the <strong>Marks</strong> or <strong>Insert</strong> toolbar buttons — these are used rarely enough that they don't need key bindings.</div>
+        <div class="hk-row"><span>Tremolo 1 / 2 / 3 (single / double / triple-stroke roll)</span></div>
+        <div class="hk-row"><span>Capo marking (Marks → Capo)</span></div>
+        <div class="hk-row"><span>rit. · accel. · a tempo</span></div>
+        <div class="hk-row"><span>Largo · Adagio · Andante · Moderato · Allegro · Presto</span></div>
+        <div class="hk-row"><span>D.S. al Coda · D.C. al Capo · D.S. al Fine · D.C. al Fine</span></div>
+        <div class="hk-row"><span>pppp · ppp · ffff (extreme dynamics — use the Dynamics menu)</span></div>
+      </div>
+
+    </div>
+  </div>
+
+  <div class="ref-section">
+    <h2>Instrument-Specific Marks</h2>
+    <div class="ref-note">Available via the "Inst. Marks" toolbar button — the set shown depends on the active part's instrument.</div>
+    <div class="hk-grid">
+      <div>
+        <div class="hk-section">
+          <h4>Guitar / Plucked <span style="font-weight:400;color:var(--ink-muted)">(Guitar, Banjo, Ukulele, Harp)</span></h4>
+          <div class="hk-row"><span>Harmonic · Natural harmonic · Palm mute · Tap · Glissando · Divisi</span></div>
+          <div class="hk-row"><span>Staccato · Accent</span></div>
+        </div>
+        <div class="hk-section">
+          <h4>Bowed Strings <span style="font-weight:400;color:var(--ink-muted)">(Violin, Viola, Cello, Bass)</span></h4>
+          <div class="hk-row"><span>Down bow · Up bow · Col legno · Sul ponticello · Sul tasto</span></div>
+          <div class="hk-row"><span>Harmonic · Pizzicato · Arco · Spiccato</span></div>
+        </div>
+      </div>
+      <div>
+        <div class="hk-section">
+          <h4>Drums / Pitched Percussion</h4>
+          <div class="hk-row"><span>Open · Closed · Cross-stick · Half-open · Choke cymbal · Bell · Muted</span></div>
+          <div class="hk-row"><span>Single / double / triple-stroke roll</span></div>
+        </div>
+        <div class="hk-section">
+          <h4>Winds <span style="font-weight:400;color:var(--ink-muted)">(Flute → Tuba)</span></h4>
+          <div class="hk-row"><span>Flutter tongue · Multiphonic · Growl · Slap tongue · Key click · Overblown</span></div>
+          <div class="hk-row"><span>Mutes: Harmon · Cup · Straight · Plunger · Open</span></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+</div>
+</div>
+</body>
+</html>

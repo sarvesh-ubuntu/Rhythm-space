@@ -1,0 +1,9 @@
+{
+  "scripts": {
+    "deploy": "wrangler deploy",
+    "db:migrate": "wrangler d1 migrations apply rythem_space"
+  },
+  "devDependencies": {
+    "wrangler": "4.110.0"
+  }
+}
