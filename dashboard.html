@@ -51,31 +51,31 @@
           <div class="dash-card-desc">Continue from your autosaved draft.</div>
         </a>
 
-        <button class="dash-card dash-card-dim" type="button" data-goto-tab="sheets">
+        <button class="dash-card" type="button" data-goto-tab="sheets">
           <div class="dash-card-icon">♪</div>
           <div class="dash-card-title">My Sheets</div>
           <div class="dash-card-desc">Browse compositions saved to your account.</div>
+          <span class="dash-badge dash-badge-live">Cloud</span>
         </button>
       </div>
     </section>
 
     <section class="dash-panel" id="panel-sheets" hidden>
       <h1>My Sheets</h1>
-      <p class="dash-sub">Compositions tied to your account will live here.</p>
+      <p class="dash-sub">Compositions saved to your account from the workspace's Save button (⌘S).</p>
 
       <div class="dash-disclaimer">
-        <strong>Data note:</strong> cloud sync is being added now, but local
-        autosave and browser storage can still fail or be cleared. Keep a
-        downloaded copy of anything you cannot afford to lose.
+        <strong>Data note:</strong> sheets you save from the workspace are stored
+        in the cloud and tied to your account. Local autosave/browser storage is
+        still just a same-device safety net, not a backup — keep a downloaded
+        copy of anything you can't afford to lose.
       </div>
 
       <div class="dash-empty" id="sheets-empty">
         <div class="dash-empty-icon">♪</div>
-        <div class="dash-empty-title">Nothing here yet</div>
-        <div class="dash-empty-desc">
-          If the API is not live yet, use Save/Load in the workspace to
-          keep files on your own device. Once the Cloudflare worker and D1
-          database are deployed, everything you save will show up here.
+        <div class="dash-empty-title" id="sheets-empty-title">Loading your sheets…</div>
+        <div class="dash-empty-desc" id="sheets-empty-desc">
+          Hang tight while we fetch your saved compositions.
         </div>
       </div>
 
@@ -106,10 +106,15 @@
   // ── Tab switching ─────────────────────────────────────────────────
   const tabs   = document.querySelectorAll('.dash-tab');
   const panels = { overview: document.getElementById('panel-overview'), sheets: document.getElementById('panel-sheets') };
+  let sheetsLoadedOnce = false;
 
   function goToTab(name) {
     tabs.forEach(t => t.classList.toggle('active', t.dataset.tab === name));
     Object.keys(panels).forEach(k => { panels[k].hidden = k !== name; });
+    // Lazily fetch the first time the tab is actually opened, and silently
+    // refresh on every subsequent visit so a sheet saved in another tab
+    // (or just now, in the editor) shows up without a full page reload.
+    if (name === 'sheets') renderSheets();
   }
 
   function escHtml(value) {
@@ -125,18 +130,37 @@
     el.addEventListener('click', () => goToTab(el.dataset.gotoTab));
   });
 
-  const emptyState = document.getElementById('sheets-empty');
-  const sheetsList = document.getElementById('sheets-list');
+  const emptyState     = document.getElementById('sheets-empty');
+  const emptyTitleEl   = document.getElementById('sheets-empty-title');
+  const emptyDescEl    = document.getElementById('sheets-empty-desc');
+  const sheetsList     = document.getElementById('sheets-list');
+
+  function showEmpty(title, desc) {
+    emptyState.hidden = false;
+    sheetsList.hidden = true;
+    emptyTitleEl.textContent = title;
+    emptyDescEl.textContent  = desc;
+  }
 
   async function renderSheets() {
     const api = window.RymSheets;
     if (!api) return;
+
+    // Only show the "Loading…" flash on the very first fetch — a background
+    // refresh (tab revisit) shouldn't blank out an already-populated list.
+    if (!sheetsLoadedOnce) {
+      showEmpty('Loading your sheets…', 'Hang tight while we fetch your saved compositions.');
+    }
+
     try {
       const sheets = await api.listSheets();
+      sheetsLoadedOnce = true;
+
       if (!sheets.length) {
-        emptyState.hidden = false;
-        sheetsList.hidden = true;
-        sheetsList.innerHTML = '';
+        showEmpty(
+          'Nothing here yet',
+          'Save a composition from the workspace (Save button or ⌘S while signed in) and it will show up here.'
+        );
         return;
       }
 
@@ -160,19 +184,30 @@
       sheetsList.querySelectorAll('[data-sheet-delete]').forEach(btn => {
         btn.addEventListener('click', async () => {
           if (!confirm('Delete this sheet from cloud storage?')) return;
-          await api.deleteSheet(btn.dataset.sheetDelete);
-          await renderSheets();
+          btn.disabled = true;
+          btn.textContent = 'Deleting…';
+          try {
+            await api.deleteSheet(btn.dataset.sheetDelete);
+            await renderSheets();
+          } catch (err) {
+            btn.disabled = false;
+            btn.textContent = 'Delete';
+            alert('Could not delete this sheet. Try again in a moment.');
+          }
         });
       });
     } catch (err) {
-      emptyState.hidden = false;
-      sheetsList.hidden = true;
-      emptyState.querySelector('.dash-empty-title').textContent = 'Cloud storage unavailable';
-      emptyState.querySelector('.dash-empty-desc').textContent =
-        'The dashboard cannot reach the sheet API right now. You can still use local Save/Load in the editor.';
+      sheetsLoadedOnce = true;
+      showEmpty(
+        'Cloud storage unavailable',
+        'The dashboard cannot reach the sheet API right now. You can still use local Save/Load in the editor.'
+      );
     }
   }
 
+  // Overview is the default tab, so fetch sheets in the background right
+  // away too — by the time someone clicks "My Sheets" the list is usually
+  // already there instead of showing the loading flash.
   renderSheets();
 
   // Register PWA service worker (same as index.html)
