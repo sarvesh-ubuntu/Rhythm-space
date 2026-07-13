@@ -13,4 +13,4 @@ not_found_handling = "single-page-application"
 [[d1_databases]]
 binding = "DB"
 database_name = "rythem_space"
-database_id = " e4ebc87e-fced-47dd-883e-86e62780f46c"
+database_id = "e4ebc87e-fced-47dd-883e-86e62780f46c"
