@@ -52,7 +52,7 @@
 <script>
   // Already signed in? Skip straight to the dashboard.
   if (window.RymAuth.getCurrentUser()) {
-    window.location.replace('dashboard.html');
+    window.location.replace('index.html');
   }
 
   let mode = 'signin'; // 'signin' | 'signup'
@@ -92,14 +92,14 @@
       } else {
         await window.RymAuth.signIn(emailInput.value, pwInput.value);
       }
-      window.location.href = 'dashboard.html';
+      window.location.href = 'index.html';
     } catch (err) {
       errorEl.textContent = err.message || 'Something went wrong. Try again.';
       submitBtn.disabled = false;
     }
   });
 
-  // Register PWA service worker (same as index.html)
+  // Register PWA service worker (same as editor.html)
   if ('serviceWorker' in navigator) {
     window.addEventListener('load', () => {
       navigator.serviceWorker.register('sw.js').catch(() => {});
