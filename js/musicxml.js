@@ -933,226 +933,228 @@ function importMusicXML(xmlString) {
 
     const measureEls = [...partEl.querySelectorAll('measure')];
 
-    measureEls.forEach((mEl, mi) => {
+    measureEls.forEach((mEl) => {
 
-      // ── <attributes> ──────────────────────────────────────────────
-      // NOTE: a measure can legally contain more than one <attributes>
-      // block (a mid-measure clef/key/time change) — querySelectorAll
-      // (not querySelector) so every one of them is applied, not just
-      // the first, matching what the on-screen renderer does when the
-      // score was authored with a "Score → Here" change.
-      mEl.querySelectorAll('attributes').forEach(attrEl => {
-        const divEl = attrEl.querySelector('divisions');
-        if (divEl) divisions = parseInt(divEl.textContent) || 1;
+      // A single pass over this measure's DIRECT CHILDREN, in document
+      // order, dispatching by tag name — NOT separate querySelectorAll
+      // sweeps per tag (attributes/direction/barline/note). Four separate
+      // sweeps is what the previous version of this file did, and it's a
+      // real correctness bug: it collapses every mark in a measure to
+      // "before all its notes" regardless of where they actually sit
+      // relative to each other, so e.g. a tempo change written AFTER the
+      // first note of a measure would silently jump to the front of the
+      // measure on import. A single in-order pass is what makes an
+      // export → import → export round trip reproduce the identical file,
+      // including relative placement of marks between notes.
+      [...mEl.children].forEach(child => {
+        const tag = child.tagName;
 
-        const fifthsEl = attrEl.querySelector('key > fifths');
-        if (fifthsEl) {
-          const newKey = _fifthsToKey(parseInt(fifthsEl.textContent) || 0);
-          if (newKey !== key) {
-            if (mi > 0 || initialKey !== null) notes.push({ _id: _uid(), type: 'key', key: newKey });
-            key = newKey;
+        // ── <attributes> ────────────────────────────────────────────
+        // A measure can legally contain more than one of these (a
+        // mid-measure clef/key/time change) — each one encountered here
+        // is applied in place, matching the on-screen renderer.
+        if (tag === 'attributes') {
+          const divEl = child.querySelector('divisions');
+          if (divEl) divisions = parseInt(divEl.textContent) || 1;
+
+          const fifthsEl = child.querySelector('key > fifths');
+          if (fifthsEl) {
+            const newKey = _fifthsToKey(parseInt(fifthsEl.textContent) || 0);
+            if (initialKey === null) { key = newKey; initialKey = newKey; }
+            else if (newKey !== key) { notes.push({ _id: _uid(), type: 'key', key: newKey }); key = newKey; }
           }
-        }
 
-        const beatsEl    = attrEl.querySelector('time > beats');
-        const beatTypeEl = attrEl.querySelector('time > beat-type');
-        if (beatsEl && beatTypeEl) {
-          const newTS = `${beatsEl.textContent.trim()}/${beatTypeEl.textContent.trim()}`;
-          if (newTS !== timeSig) {
-            if (mi > 0 || initialTimeSig !== null) notes.push({ _id: _uid(), type: 'timesig', timesig: newTS });
-            timeSig = newTS;
+          const beatsEl    = child.querySelector('time > beats');
+          const beatTypeEl = child.querySelector('time > beat-type');
+          if (beatsEl && beatTypeEl) {
+            const newTS = `${beatsEl.textContent.trim()}/${beatTypeEl.textContent.trim()}`;
+            if (initialTimeSig === null) { timeSig = newTS; initialTimeSig = newTS; }
+            else if (newTS !== timeSig) { notes.push({ _id: _uid(), type: 'timesig', timesig: newTS }); timeSig = newTS; }
           }
-        }
 
-        const clefSignEl = attrEl.querySelector('clef > sign');
-        const clefLineEl = attrEl.querySelector('clef > line');
-        if (clefSignEl) {
-          const newClef = _mxlToRymClef(
-            clefSignEl.textContent.toUpperCase(),
-            clefLineEl?.textContent?.trim()
-          );
-          if (newClef !== clef) {
-            if (mi > 0 || initialClef !== null) notes.push({ _id: _uid(), type: 'clef', clef: newClef });
-            clef = newClef;
+          const clefSignEl = child.querySelector('clef > sign');
+          const clefLineEl = child.querySelector('clef > line');
+          if (clefSignEl) {
+            const newClef = _mxlToRymClef(clefSignEl.textContent.toUpperCase(), clefLineEl?.textContent?.trim());
+            if (initialClef === null) { clef = newClef; initialClef = newClef; }
+            else if (newClef !== clef) { notes.push({ _id: _uid(), type: 'clef', clef: newClef }); clef = newClef; }
           }
-        }
-
-        // Capture initial state from the FIRST <attributes> block only.
-        if (initialClef    === null) initialClef    = clef;
-        if (initialKey     === null) initialKey     = key;
-        if (initialTimeSig === null) initialTimeSig = timeSig;
-      });
-
-      // ── <direction> ───────────────────────────────────────────────
-      mEl.querySelectorAll('direction').forEach(dEl => {
-        // Dynamics (standalone — a swatch inserted between notes)
-        const dynEl = dEl.querySelector('dynamics');
-        if (dynEl?.firstElementChild) {
-          notes.push({ _id: _uid(), type: 'dynamic', dynamic: dynEl.firstElementChild.tagName });
           return;
         }
 
-        // Rehearsal marks — dedicated element, not text.
-        const rehearsalEl = dEl.querySelector('direction-type > rehearsal');
-        if (rehearsalEl) {
-          notes.push({ _id: _uid(), type: 'rehearsal', label: rehearsalEl.textContent.trim() });
-          return;
-        }
-
-        // Segno / Coda — dedicated elements.
-        if (dEl.querySelector('direction-type > segno')) {
-          notes.push({ _id: _uid(), type: 'segno' });
-          return;
-        }
-        if (dEl.querySelector('direction-type > coda')) {
-          notes.push({ _id: _uid(), type: 'coda' });
-          return;
-        }
-
-        // Pedal — dedicated element.
-        const pedalEl = dEl.querySelector('direction-type > pedal');
-        if (pedalEl) {
-          const pType = pedalEl.getAttribute('type');
-          notes.push({ _id: _uid(), type: 'pedal', pedal: (pType === 'stop') ? 'up' : 'down' });
-          return;
-        }
-
-        // Words: could be a nav mark (Fine / D.S. al Coda / …), a Capo
-        // marking, a tempo text, or a general expression text — checked
-        // in that order, since nav-mark and Capo text are both recognized
-        // by exact shape; anything else falls back to the placement-based
-        // tempo/expression split (see _textMarkToXmlLines for the
-        // matching export-side convention).
-        const wordsEl = dEl.querySelector('direction-type > words');
-        if (wordsEl) {
-          const text = wordsEl.textContent.trim();
-
-          if (NAV_LABELS_REV[text]) {
-            notes.push({ _id: _uid(), type: 'nav', nav: NAV_LABELS_REV[text] });
+        // ── <direction> ─────────────────────────────────────────────
+        if (tag === 'direction') {
+          // Dynamics (standalone — a swatch inserted between notes)
+          const dynEl = child.querySelector('dynamics');
+          if (dynEl?.firstElementChild) {
+            notes.push({ _id: _uid(), type: 'dynamic', dynamic: dynEl.firstElementChild.tagName });
             return;
           }
 
-          if (/^Capo\s+\d+$/i.test(text)) {
-            notes.push({ _id: _uid(), type: 'text', text, subtype: 'expression' });
+          // Rehearsal marks — dedicated element, not text.
+          const rehearsalEl = child.querySelector('direction-type > rehearsal');
+          if (rehearsalEl) {
+            notes.push({ _id: _uid(), type: 'rehearsal', label: rehearsalEl.textContent.trim() });
             return;
           }
 
-          const placement = dEl.getAttribute('placement') || 'above';
-          const subtype   = placement === 'above' ? 'tempo' : 'expression';
-          notes.push({ _id: _uid(), type: 'text-mark', text, subtype });
-        }
-      });
+          // Segno / Coda — dedicated elements.
+          if (child.querySelector('direction-type > segno')) {
+            notes.push({ _id: _uid(), type: 'segno' });
+            return;
+          }
+          if (child.querySelector('direction-type > coda')) {
+            notes.push({ _id: _uid(), type: 'coda' });
+            return;
+          }
 
-      // ── <barline> (repeats) ───────────────────────────────────────
-      mEl.querySelectorAll('barline').forEach(bEl => {
-        const repeatEl = bEl.querySelector('repeat');
-        if (repeatEl) {
-          const dir = repeatEl.getAttribute('direction') === 'forward' ? 'start' : 'end';
-          notes.push({ _id: _uid(), type: 'repeat', direction: dir });
-        }
-      });
+          // Pedal — dedicated element.
+          const pedalEl = child.querySelector('direction-type > pedal');
+          if (pedalEl) {
+            const pType = pedalEl.getAttribute('type');
+            notes.push({ _id: _uid(), type: 'pedal', pedal: (pType === 'stop') ? 'up' : 'down' });
+            return;
+          }
 
-      // ── <note> ────────────────────────────────────────────────────
-      mEl.querySelectorAll('note').forEach(nEl => {
-        const isRest  = !!nEl.querySelector('rest');
-        const isChord = !!nEl.querySelector('chord');
-        const typeEl  = nEl.querySelector('type');
-        const dotEls  = nEl.querySelectorAll('dot');
-        const timeMod = nEl.querySelector('time-modification');
+          // Words: could be a nav mark (Fine / D.S. al Coda / …), a Capo
+          // marking, a tempo text, or a general expression text — checked
+          // in that order, since nav-mark and Capo text are both
+          // recognized by exact shape; anything else falls back to the
+          // placement-based tempo/expression split (see
+          // _textMarkToXmlLines for the matching export-side convention).
+          const wordsEl = child.querySelector('direction-type > words');
+          if (wordsEl) {
+            const text = wordsEl.textContent.trim();
 
-        // A <chord/> note is an EXTRA pitch on the previous note event,
-        // not a new rhythmic event — merge it in and stop.
-        if (isChord && !isRest && pendingChordHead) {
-          const pitch  = nEl.querySelector('pitch > step')?.textContent?.trim() || 'C';
-          const octave = parseInt(nEl.querySelector('pitch > octave')?.textContent) || 4;
-          const alter  = parseFloat(nEl.querySelector('pitch > alter')?.textContent || '0');
-          const accidental  = alter === 1 ? '#' : alter === -1 ? 'b' : null;
-          const accExplicit = !!nEl.querySelector('accidental');
-          pendingChordHead.pitches.push({ pitch, accidental, octave, accExplicit });
+            if (NAV_LABELS_REV[text]) {
+              notes.push({ _id: _uid(), type: 'nav', nav: NAV_LABELS_REV[text] });
+              return;
+            }
+            if (/^Capo\s+\d+$/i.test(text)) {
+              notes.push({ _id: _uid(), type: 'text', text, subtype: 'expression' });
+              return;
+            }
+
+            const placement = child.getAttribute('placement') || 'above';
+            const subtype   = placement === 'above' ? 'tempo' : 'expression';
+            notes.push({ _id: _uid(), type: 'text-mark', text, subtype });
+          }
           return;
         }
 
-        const isTriplet = timeMod
-          && parseInt(timeMod.querySelector('actual-notes')?.textContent) === 3
-          && parseInt(timeMod.querySelector('normal-notes')?.textContent)  === 2;
-
-        const mxlType = typeEl?.textContent?.trim() || 'quarter';
-        let rymDur    = MXL_TYPE_TO_RYM[mxlType] || 'quarter';
-
-        if (isTriplet && rymDur === 'quarter') {
-          rymDur = 'quarter-triplet';
-        } else if (dotEls.length > 0) {
-          const dotted = rymDur + '-dotted';
-          if (DUR_BEATS[dotted] !== undefined) rymDur = dotted;
+        // ── <barline> (repeats) ─────────────────────────────────────
+        if (tag === 'barline') {
+          const repeatEl = child.querySelector('repeat');
+          if (repeatEl) {
+            const dir = repeatEl.getAttribute('direction') === 'forward' ? 'start' : 'end';
+            notes.push({ _id: _uid(), type: 'repeat', direction: dir });
+          }
+          return;
         }
 
-        const ev = {
-          _id:      _uid(),
-          type:     isRest ? 'rest' : 'note',
-          duration: rymDur,
-        };
+        // ── <note> ───────────────────────────────────────────────────
+        if (tag === 'note') {
+          const nEl     = child;
+          const isRest  = !!nEl.querySelector('rest');
+          const isChord = !!nEl.querySelector('chord');
+          const typeEl  = nEl.querySelector('type');
+          const dotEls  = nEl.querySelectorAll('dot');
+          const timeMod = nEl.querySelector('time-modification');
 
-        if (!isRest) {
-          const pitch  = nEl.querySelector('pitch > step')?.textContent?.trim() || 'C';
-          const octave = parseInt(nEl.querySelector('pitch > octave')?.textContent) || 4;
-          const alter  = parseFloat(nEl.querySelector('pitch > alter')?.textContent || '0');
-          const accidental  = alter === 1 ? '#' : alter === -1 ? 'b' : null;
-          const accExplicit = !!nEl.querySelector('accidental');
-
-          ev.pitch  = pitch;
-          ev.octave = octave;
-          ev.accidental = accidental;
-          if (accExplicit) ev.accExplicit = true;
-          ev.pitches = [{ pitch, accidental, octave, accExplicit }];
-
-          // Tie: only a <tie type="start"/> sets our tie flag — matching
-          // the export convention (ev.tie === true → ties FORWARD into
-          // the next matching note). A stop-only tie (the second half of
-          // a pair) needs no flag on this side; it's implied by the
-          // previous note's start.
-          const tieStartEl = [...nEl.querySelectorAll('tie')].find(t => t.getAttribute('type') === 'start');
-          if (tieStartEl) ev.tie = true;
-
-          const notationsEl = nEl.querySelector('notations');
-          if (notationsEl) {
-            const arts = [];
-            if (notationsEl.querySelector('articulations staccato'))           arts.push('staccato');
-            if (notationsEl.querySelector('articulations accent'))             arts.push('accent');
-            if (notationsEl.querySelector('articulations tenuto'))             arts.push('tenuto');
-            if (notationsEl.querySelector('articulations strong-accent'))      arts.push('marcato');
-            if (notationsEl.querySelector('fermata'))                         arts.push('fermata');
-            if (notationsEl.querySelector('ornaments trill-mark'))            arts.push('trill');
-            if (arts.length) ev.articulations = arts;
-
-            const tremEl = notationsEl.querySelector('ornaments tremolo');
-            if (tremEl) ev.tremolo = parseInt(tremEl.textContent) || 1;
-
-            notationsEl.querySelectorAll('slur').forEach(slurEl => {
-              const slurType = slurEl.getAttribute('type');
-              const slurNum  = slurEl.getAttribute('number') || '1';
-              if (slurType === 'start') {
-                openSlurs[slurNum] = ev._id;
-              } else if (slurType === 'stop' && openSlurs[slurNum]) {
-                slurs.push({ fromId: openSlurs[slurNum], toId: ev._id });
-                delete openSlurs[slurNum];
-              }
-            });
-
-            const notedDynEl = notationsEl.querySelector('dynamics');
-            if (notedDynEl?.firstElementChild) ev.dynamic = notedDynEl.firstElementChild.tagName;
+          // A <chord/> note is an EXTRA pitch on the previous note event,
+          // not a new rhythmic event — merge it in and stop.
+          if (isChord && !isRest && pendingChordHead) {
+            const pitch  = nEl.querySelector('pitch > step')?.textContent?.trim() || 'C';
+            const octave = parseInt(nEl.querySelector('pitch > octave')?.textContent) || 4;
+            const alter  = parseFloat(nEl.querySelector('pitch > alter')?.textContent || '0');
+            const accidental  = alter === 1 ? '#' : alter === -1 ? 'b' : null;
+            const accExplicit = !!nEl.querySelector('accidental');
+            pendingChordHead.pitches.push({ pitch, accidental, octave, accExplicit });
+            return;
           }
 
-          // Fallback for a stray note-level <dynamics> not nested inside
-          // <notations> (invalid per-schema, but tolerate other tools'
-          // output defensively).
-          if (!ev.dynamic) {
-            const looseDynEl = nEl.querySelector('dynamics');
-            if (looseDynEl?.firstElementChild) ev.dynamic = looseDynEl.firstElementChild.tagName;
+          const isTriplet = timeMod
+            && parseInt(timeMod.querySelector('actual-notes')?.textContent) === 3
+            && parseInt(timeMod.querySelector('normal-notes')?.textContent)  === 2;
+
+          const mxlType = typeEl?.textContent?.trim() || 'quarter';
+          let rymDur    = MXL_TYPE_TO_RYM[mxlType] || 'quarter';
+
+          if (isTriplet && rymDur === 'quarter') {
+            rymDur = 'quarter-triplet';
+          } else if (dotEls.length > 0) {
+            const dotted = rymDur + '-dotted';
+            if (DUR_BEATS[dotted] !== undefined) rymDur = dotted;
           }
+
+          const ev = {
+            _id:      _uid(),
+            type:     isRest ? 'rest' : 'note',
+            duration: rymDur,
+          };
+
+          if (!isRest) {
+            const pitch  = nEl.querySelector('pitch > step')?.textContent?.trim() || 'C';
+            const octave = parseInt(nEl.querySelector('pitch > octave')?.textContent) || 4;
+            const alter  = parseFloat(nEl.querySelector('pitch > alter')?.textContent || '0');
+            const accidental  = alter === 1 ? '#' : alter === -1 ? 'b' : null;
+            const accExplicit = !!nEl.querySelector('accidental');
+
+            ev.pitch  = pitch;
+            ev.octave = octave;
+            ev.accidental = accidental;
+            if (accExplicit) ev.accExplicit = true;
+            ev.pitches = [{ pitch, accidental, octave, accExplicit }];
+
+            // Tie: only a <tie type="start"/> sets our tie flag — matching
+            // the export convention (ev.tie === true → ties FORWARD into
+            // the next matching note). A stop-only tie (the second half
+            // of a pair) needs no flag on this side; it's implied by the
+            // previous note's start.
+            const tieStartEl = [...nEl.querySelectorAll('tie')].find(t => t.getAttribute('type') === 'start');
+            if (tieStartEl) ev.tie = true;
+
+            const notationsEl = nEl.querySelector('notations');
+            if (notationsEl) {
+              const arts = [];
+              if (notationsEl.querySelector('articulations staccato'))           arts.push('staccato');
+              if (notationsEl.querySelector('articulations accent'))             arts.push('accent');
+              if (notationsEl.querySelector('articulations tenuto'))             arts.push('tenuto');
+              if (notationsEl.querySelector('articulations strong-accent'))      arts.push('marcato');
+              if (notationsEl.querySelector('fermata'))                         arts.push('fermata');
+              if (notationsEl.querySelector('ornaments trill-mark'))            arts.push('trill');
+              if (arts.length) ev.articulations = arts;
+
+              const tremEl = notationsEl.querySelector('ornaments tremolo');
+              if (tremEl) ev.tremolo = parseInt(tremEl.textContent) || 1;
+
+              notationsEl.querySelectorAll('slur').forEach(slurEl => {
+                const slurType = slurEl.getAttribute('type');
+                const slurNum  = slurEl.getAttribute('number') || '1';
+                if (slurType === 'start') {
+                  openSlurs[slurNum] = ev._id;
+                } else if (slurType === 'stop' && openSlurs[slurNum]) {
+                  slurs.push({ fromId: openSlurs[slurNum], toId: ev._id });
+                  delete openSlurs[slurNum];
+                }
+              });
+
+              const notedDynEl = notationsEl.querySelector('dynamics');
+              if (notedDynEl?.firstElementChild) ev.dynamic = notedDynEl.firstElementChild.tagName;
+            }
+
+            // Fallback for a stray note-level <dynamics> not nested
+            // inside <notations> (invalid per-schema, but tolerate other
+            // tools' output defensively).
+            if (!ev.dynamic) {
+              const looseDynEl = nEl.querySelector('dynamics');
+              if (looseDynEl?.firstElementChild) ev.dynamic = looseDynEl.firstElementChild.tagName;
+            }
+          }
+
+          notes.push(ev);
+          pendingChordHead = isRest ? null : ev;
         }
-
-        notes.push(ev);
-        pendingChordHead = isRest ? null : ev;
       });
     });
 
