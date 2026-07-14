@@ -7,6 +7,67 @@
  * Usage:
  *   window.MusicXML.exportMusicXML(parts, title)  → XML string
  *   window.MusicXML.importMusicXML(xmlString)      → { title, parts }
+ *
+ * ─── FIDELITY PASS (this revision) ──────────────────────────────────────
+ * Audited against every mark the editor can actually produce (app.js's
+ * insertToken()/insertNote()/toggleArticulation() call sites) and fixed
+ * everything that was silently dropped or mis-encoded on export/import:
+ *
+ *   - Chords (ev.pitches[]) — previously only the primary pitch was ever
+ *     exported; extra chord pitches vanished entirely. Now exported as
+ *     proper <chord/> note groups and re-merged on import.
+ *   - Slurs (part.slurs[]) — previously not exported AT ALL (import could
+ *     read them, but there was nothing to read from this app's own
+ *     output). Now exported with proper start/stop numbering.
+ *   - Fermata and trill — articulations list included them, but export
+ *     silently skipped both. Now emitted as <fermata/> / <trill-mark/>.
+ *   - Rehearsal marks, segno, coda, pedal, D.S./D.C./Fine nav marks — the
+ *     old code had a comment admitting these were "omitted for brevity"
+ *     from export, and none of them were parsed on import either. All six
+ *     now round-trip using their proper dedicated MusicXML elements.
+ *   - Capo markings (type:'text') — export only ever checked for
+ *     type:'text-mark', so Capo tokens (a different type) were dropped.
+ *   - Tempo vs. expression text-marks — export hardcoded placement="above"
+ *     for every text-mark regardless of subtype, while import classifies
+ *     subtype FROM placement. Net effect: every expression mark (pizz.,
+ *     con sord., dolce, ...) flipped into a tempo mark on any export→
+ *     import round trip. Fixed so export's placement matches its own
+ *     subtype, which is what import expects.
+ *   - Note-level <dynamics> was previously a direct child of <note>, which
+ *     isn't valid MusicXML — it belongs inside <notations>. Fixed.
+ *   - Ties previously only ever emitted <tie type="start"/>, never the
+ *     matching <tie type="stop"/> on the following note — technically
+ *     invalid MusicXML. Now paired correctly (see _computeTieLinks).
+ *   - Mid-measure key/clef/time-signature changes ("Score → Here", or the
+ *     K/T/L hotkeys used mid-bar) used to be silently deferred to the
+ *     next measure boundary on export, disagreeing with the on-screen
+ *     renderer (which applies them immediately). Now emits an inline
+ *     <attributes> block at the exact point of change, matching the
+ *     screen.
+ *   - Repeat barlines used to be written into the XML without actually
+ *     splitting the <measure> element there — an invalid combination
+ *     (barlines are measure boundaries in MusicXML). Measures now split
+ *     exactly where a repeat token sits, mirroring engine.js's own
+ *     "repeat barlines are always real measure boundaries" rule.
+ *   - Accidental *display* (the <accidental> courtesy-symbol element,
+ *     independent of the actual sounding pitch) previously just echoed
+ *     whatever the note's own accExplicit flag happened to be, which
+ *     only reflects whether the user typed a #/-/= prefix — not whether
+ *     the symbol is actually needed in context. Now uses the same
+ *     measure-carried-accidental convention real engraving (and this
+ *     app's own renderer) uses, so the exported symbol placement matches
+ *     the screen exactly.
+ *
+ * Not covered by this pass (documented, not silently skipped):
+ *   - Grand-staff (piano) and TAB-staff export as literal multi-staff
+ *     MusicXML <staves>. Both are purely on-screen rendering splits of a
+ *     single note stream — no pitch/rhythm/mark data is lost by exporting
+ *     a piano or guitar part as one staff, it just isn't split into two
+ *     visually. Real multi-staff export is a separate, structural feature
+ *     (staff-details, <staff> tags per note, <staff-tuning>) rather than
+ *     a "mark," and is left as a follow-up.
+ *   - Hairpins/grace notes — not implemented anywhere in the data model
+ *     or renderer yet, so there is nothing to export.
  */
 'use strict';
 
@@ -174,19 +235,93 @@ function _matchCategory(name) {
   return 'struck-strings';
 }
 
+// ─── Accidental-display bookkeeping ────────────────────────────────────────────
+// A note's ACTUAL sounding pitch (used for <alter>) always comes straight
+// from the event's own stored accidental — that's the single source of
+// truth this app's own renderer (engine.js's VexFlow key-building) and
+// playback both use. Whether to also print an <accidental> SYMBOL is a
+// separate, purely-visual question, decided the way real engraving (and
+// this app's own on-screen renderer, engine.js's resolveAccidental) does:
+// show it only when it differs from whatever's currently "in force" for
+// that letter within the measure, and carry the new value forward.
+
+const KEY_SHARP_ORDER = ['F','C','G','D','A','E','B'];
+const KEY_FLAT_ORDER  = ['B','E','A','D','G','C','F'];
+
+function _keyAccidentalDefaults(key) {
+  const state = { C:null, D:null, E:null, F:null, G:null, A:null, B:null };
+  const fifths = _keyToFifths(key);
+  if (!fifths) return state;
+  const order = fifths > 0 ? KEY_SHARP_ORDER : KEY_FLAT_ORDER;
+  const acc = fifths > 0 ? '#' : 'b';
+  for (let i = 0; i < Math.abs(fifths); i++) state[order[i]] = acc;
+  return state;
+}
+
+function _normAcc(a) { return a === '#' || a === 'b' ? a : null; }
+
+function _newAccidentalCtx(key) {
+  return { state: _keyAccidentalDefaults(key) };
+}
+
+/** Returns true if an <accidental> symbol should be printed for this
+ *  pitch right now, and updates the running per-letter state either way. */
+function _accidentalNeedsDisplay(ctx, pitchInfo) {
+  const letter   = pitchInfo.pitch;
+  const sounding = _normAcc(pitchInfo.accidental ?? pitchInfo.acc ?? null);
+  const inForce  = Object.prototype.hasOwnProperty.call(ctx.state, letter) ? ctx.state[letter] : null;
+  const needed   = sounding !== (inForce ?? null);
+  ctx.state[letter] = sounding;
+  return needed;
+}
+
+// ─── Chord pitch ordering (standalone chroma calc — mirrors engine.js's
+//     noteToChrom without depending on it being loaded) ────────────────────────
+
+const _CHROM_VAL = { C:0, D:2, E:4, F:5, G:7, A:9, B:11 };
+
+function _chromOf(pi) {
+  const alt = pi.accidental === '#' ? 1 : pi.accidental === 'b' ? -1 : 0;
+  return (pi.octave ?? 4) * 12 + (_CHROM_VAL[pi.pitch] ?? 0) + alt;
+}
+
+// ─── Nav-mark label table (shared by export + import) ──────────────────────────
+
+const NAV_LABELS = {
+  'fine':       'Fine',
+  'ds-al-coda': 'D.S. al Coda',
+  'dc-al-capo': 'D.C. al Capo',
+  'ds-al-fine': 'D.S. al Fine',
+  'dc-al-fine': 'D.C. al Fine'
+};
+const NAV_LABELS_REV = Object.fromEntries(Object.entries(NAV_LABELS).map(([k, v]) => [v, k]));
+
+// <sound> attributes give a nav mark real jump semantics for any
+// MusicXML-compliant reader, on top of the plain display text.
+const NAV_SOUND_ATTR = {
+  'fine':       'fine="yes"',
+  'dc-al-capo': 'dacapo="yes"',
+  'dc-al-fine': 'dacapo="yes"',
+  'ds-al-coda': 'dalsegno="segno1"',
+  'ds-al-fine': 'dalsegno="segno1"',
+};
+
 // ─── Export helpers ────────────────────────────────────────────────────────────
 
 /**
  * Flatten the notes[] array of a part into an array of "measure objects" that
- * the exporter can iterate over.  Attribute changes (clef, key, timesig) that
- * occur mid-stream are tracked so the correct <attributes> block is emitted at
- * the start of each measure.
+ * the exporter can iterate over.  Attribute changes (clef/key/timesig) are
+ * applied immediately at the point they occur (matching the on-screen
+ * renderer) and left as inline markers in the event stream so a fresh
+ * <attributes> block can be emitted mid-measure if needed. Repeat barlines
+ * always force a real measure boundary, exactly where they were typed —
+ * mirroring engine.js's buildMeasures, and required for a repeat barline
+ * to be valid MusicXML (barlines ARE measure boundaries there).
  *
  * Returns: Array<{
  *   number,
- *   clef, key, timeSig,
- *   clefChanged, keyChanged, timeSigChanged,
- *   events: [ note/rest/dynamic/repeat tokens ]
+ *   startClef, startKey, startTimeSig,   // state in effect at measure start
+ *   events: [ note/rest/mark/attr-change tokens ]
  * }>
  */
 function _buildExportMeasures(part) {
@@ -200,53 +335,52 @@ function _buildExportMeasures(part) {
   let curTimeSig = part.timeSig || '4/4';
   let cap        = _measureBeats(curTimeSig);
 
-  // Pending attribute changes that should appear at the start of the NEXT measure
-  let pendingClef    = null;
-  let pendingKey     = null;
-  let pendingTimeSig = null;
-
   function pushMeasure() {
     const m = {
-      number:        measures.length + 1,
-      clef:          pendingClef    ?? curClef,
-      key:           pendingKey     ?? curKey,
-      timeSig:       pendingTimeSig ?? curTimeSig,
-      clefChanged:   pendingClef    !== null,
-      keyChanged:    pendingKey     !== null,
-      timeSigChanged: pendingTimeSig !== null,
+      number: measures.length + 1,
+      startClef: curClef, startKey: curKey, startTimeSig: curTimeSig,
       events: []
     };
-    // Commit pending
-    if (pendingClef)    curClef    = pendingClef;
-    if (pendingKey)     curKey     = pendingKey;
-    if (pendingTimeSig) curTimeSig = pendingTimeSig;
-    pendingClef = pendingKey = pendingTimeSig = null;
     cap  = _measureBeats(curTimeSig);
     beat = 0;
     measures.push(m);
     return m;
   }
 
+  function curHasNotes(m) {
+    return m.events.some(e => e.type === 'note' || e.type === 'rest');
+  }
+
   let cur = pushMeasure();
-  // First measure starts without "changed" flags — they're always emitted anyway
-  cur.clefChanged = cur.keyChanged = cur.timeSigChanged = false;
 
   for (const ev of notes) {
-    // ── Attribute tokens ──────────────────────────────────────────
-    if (ev.type === 'clef')    { pendingClef    = ev.clef;    continue; }
-    if (ev.type === 'timesig') { pendingTimeSig = ev.timesig; continue; }
-    if (ev.type === 'key')     { pendingKey     = ev.key;     continue; }
+    // ── Attribute changes — applied immediately, marker left inline ──
+    if (ev.type === 'clef')    { curClef    = ev.clef;    cur.events.push({ ...ev, _attrChange: true }); continue; }
+    if (ev.type === 'key')     { curKey     = ev.key;     cur.events.push({ ...ev, _attrChange: true }); continue; }
+    if (ev.type === 'timesig') { curTimeSig = ev.timesig; cap = _measureBeats(curTimeSig); cur.events.push({ ...ev, _attrChange: true }); continue; }
 
-    // ── Decorations (carry through to current measure) ────────────
-    if (ev.type === 'dynamic' || ev.type === 'text-mark' ||
-        ev.type === 'rehearsal' || ev.type === 'pedal' ||
-        ev.type === 'segno' || ev.type === 'coda' || ev.type === 'nav') {
-      cur.events.push(ev);
+    // ── Repeat barlines — always a real measure boundary ─────────────
+    if (ev.type === 'repeat') {
+      if (ev.direction === 'end') {
+        const freshEmpty = beat <= EPS && !curHasNotes(cur) && measures.length > 0;
+        if (freshEmpty) {
+          measures[measures.length - 1].events.push(ev);
+        } else {
+          cur.events.push(ev);
+          cur = pushMeasure();
+        }
+      } else { // 'start'
+        const curIsFreshEmpty = beat <= EPS && !curHasNotes(cur);
+        if (!curIsFreshEmpty) cur = pushMeasure();
+        cur.events.push(ev);
+      }
       continue;
     }
 
-    // ── Repeat barlines ───────────────────────────────────────────
-    if (ev.type === 'repeat') {
+    // ── Decorations (dynamics/text/rehearsal/pedal/segno/coda/nav) ───
+    if (ev.type === 'dynamic' || ev.type === 'text-mark' || ev.type === 'text' ||
+        ev.type === 'rehearsal' || ev.type === 'pedal' ||
+        ev.type === 'segno' || ev.type === 'coda' || ev.type === 'nav') {
       cur.events.push(ev);
       continue;
     }
@@ -257,7 +391,6 @@ function _buildExportMeasures(part) {
     const b = DUR_BEATS[ev.duration] ?? 0;
 
     if (beat > EPS && beat + b > cap + EPS) {
-      // Start a fresh measure (with any pending attribute changes)
       cur = pushMeasure();
     }
 
@@ -265,110 +398,217 @@ function _buildExportMeasures(part) {
     beat += b;
 
     if (Math.abs(beat - cap) < EPS) {
-      // Measure is exactly full; next note starts a new one
       cur = pushMeasure();
     }
   }
 
-  // Drop a trailing empty measure (the "lookahead" measure that was never filled)
   if (cur.events.length === 0 && measures.length > 1) measures.pop();
-
-  // Ensure at least one measure
   if (measures.length === 0) {
-    measures.push({
-      number: 1, clef: curClef, key: curKey, timeSig: curTimeSig,
-      clefChanged: false, keyChanged: false, timeSigChanged: false,
-      events: []
-    });
+    measures.push({ number: 1, startClef: curClef, startKey: curKey, startTimeSig: curTimeSig, events: [] });
   }
 
   return measures;
 }
 
-/** Serialize a single note/rest event to MusicXML lines. */
-function _noteToXmlLines(ev, indent) {
-  const I  = indent;
-  const I2 = indent + '  ';
-  const lines = [];
-  const isRest   = ev.type === 'rest';
-  const dur      = ev.duration || 'quarter';
-  const divs     = RYM_TO_MXL_DIVS[dur] ?? 8;
-  const mxlType  = RYM_TO_MXL_TYPE[dur] || 'quarter';
-  const isDotted = dur.endsWith('-dotted');
-  const isTriplet = dur.includes('triplet');
+/**
+ * Assign MusicXML slur start/stop numbers to every note event referenced
+ * by part.slurs[], reusing numbers once a slur closes (standard practice —
+ * MusicXML numbers distinguish only CONCURRENTLY open slurs).
+ * Returns Map<noteId, {starts:number[], stops:number[]}>.
+ */
+function _computeSlurLayout(part) {
+  const layout = new Map();
+  const slursRaw = part.slurs || [];
+  if (!slursRaw.length) return layout;
 
-  lines.push(`${I}<note>`);
+  const notesOnly = (part.notes || []).filter(n => n.type === 'note');
+  const idxOf = id => notesOnly.findIndex(n => n._id === id);
 
-  if (isRest) {
-    lines.push(`${I2}<rest/>`);
-  } else {
-    const step  = ev.pitch || 'C';
-    const oct   = ev.octave ?? 4;
-    const alter = ev.accidental === '#' ? 1 : ev.accidental === 'b' ? -1 : null;
-    lines.push(`${I2}<pitch>`);
-    lines.push(`${I2}  <step>${step}</step>`);
-    if (alter !== null) lines.push(`${I2}  <alter>${alter}</alter>`);
-    lines.push(`${I2}  <octave>${oct}</octave>`);
-    lines.push(`${I2}</pitch>`);
+  const slurs = slursRaw
+    .map(s => ({ fromId: s.fromId, toId: s.toId, startIdx: idxOf(s.fromId), endIdx: idxOf(s.toId) }))
+    .filter(s => s.startIdx !== -1 && s.endIdx !== -1 && s.startIdx < s.endIdx);
+  if (!slurs.length) return layout;
+
+  slurs.sort((a, b) => a.startIdx - b.startIdx || a.endIdx - b.endIdx);
+
+  const events = [];
+  slurs.forEach((s, i) => {
+    events.push({ pos: s.startIdx, isStart: true,  i });
+    events.push({ pos: s.endIdx,   isStart: false, i });
+  });
+  // At equal positions, close finishing slurs before opening new ones so a
+  // number frees up in time to be reused at the same index if needed.
+  events.sort((a, b) => a.pos - b.pos || (a.isStart === b.isStart ? 0 : a.isStart ? 1 : -1));
+
+  const freeNums = [1, 2, 3, 4, 5, 6];
+  const numOf = new Map();
+
+  function ensure(id) {
+    if (!layout.has(id)) layout.set(id, { starts: [], stops: [] });
+    return layout.get(id);
   }
 
-  lines.push(`${I2}<duration>${divs}</duration>`);
+  events.forEach(e => {
+    const s = slurs[e.i];
+    if (e.isStart) {
+      const num = freeNums.length ? freeNums.shift() : 1;
+      numOf.set(e.i, num);
+      ensure(s.fromId).starts.push(num);
+    } else {
+      const num = numOf.get(e.i) || 1;
+      ensure(s.toId).stops.push(num);
+      if (freeNums.indexOf(num) === -1) { freeNums.push(num); freeNums.sort((a, b) => a - b); }
+    }
+  });
 
-  // Tie start declaration (paired with a <tied> notation below)
-  if (!isRest && ev.tie) {
-    lines.push(`${I2}<tie type="start"/>`);
-  }
+  return layout;
+}
 
-  lines.push(`${I2}<type>${mxlType}</type>`);
-  if (isDotted) lines.push(`${I2}<dot/>`);
+/**
+ * Pre-compute valid tie start/stop pairs across a part's whole note stream.
+ * Convention (matches engine.js's on-screen renderer): ev.tie === true means
+ * this note ties FORWARD into the very next note/rest event, and the tie
+ * only actually connects if that next event is a NOTE of the same
+ * pitch+octave — an intervening rest, or a pitch mismatch, silently breaks
+ * it, exactly as the renderer already treats it.
+ * Returns { starts:Set<noteId>, stops:Set<noteId> }.
+ */
+function _computeTieLinks(part) {
+  const starts = new Set();
+  const stops  = new Set();
+  const stream = (part.notes || []).filter(ev => ev.type === 'note' || ev.type === 'rest');
 
-  if (isTriplet) {
-    lines.push(`${I2}<time-modification>`);
-    lines.push(`${I2}  <actual-notes>3</actual-notes>`);
-    lines.push(`${I2}  <normal-notes>2</normal-notes>`);
-    lines.push(`${I2}</time-modification>`);
-  }
-
-  // Accidental glyph
-  if (!isRest && ev.accExplicit && ev.accidental) {
-    const accType = ev.accidental === '#' ? 'sharp' : ev.accidental === 'b' ? 'flat' : 'natural';
-    lines.push(`${I2}<accidental>${accType}</accidental>`);
-  }
-
-  // Notations block
-  const notLines = [];
-
-  if (!isRest && ev.tie) {
-    notLines.push(`${I2}  <tied type="start"/>`);
-  }
-
-  if (ev.articulations?.length) {
-    const artics = [];
-    if (ev.articulations.includes('staccato'))  artics.push('<staccato/>');
-    if (ev.articulations.includes('accent'))    artics.push('<accent/>');
-    if (ev.articulations.includes('tenuto'))    artics.push('<tenuto/>');
-    if (ev.articulations.includes('marcato'))   artics.push('<strong-accent type="up"/>');
-    if (artics.length) {
-      notLines.push(`${I2}  <articulations>${artics.join('')}</articulations>`);
+  for (let i = 0; i < stream.length; i++) {
+    const ev = stream[i];
+    if (ev.type !== 'note' || !ev.tie) continue;
+    const next = stream[i + 1];
+    if (!next || next.type !== 'note') continue;
+    const p0 = (Array.isArray(ev.pitches)   && ev.pitches[0])   || { pitch: ev.pitch,   octave: ev.octave };
+    const n0 = (Array.isArray(next.pitches) && next.pitches[0]) || { pitch: next.pitch, octave: next.octave };
+    if (p0.pitch === n0.pitch && p0.octave === n0.octave) {
+      starts.add(ev._id);
+      stops.add(next._id);
     }
   }
 
-  if (ev.tremolo) {
-    notLines.push(`${I2}  <ornaments><tremolo type="single">${ev.tremolo}</tremolo></ornaments>`);
+  return { starts, stops };
+}
+
+function _pitchToXmlLines(pi, indent) {
+  const alter = pi.accidental === '#' ? 1 : pi.accidental === 'b' ? -1 : null;
+  const lines = [`${indent}<pitch>`, `${indent}  <step>${pi.pitch}</step>`];
+  if (alter !== null) lines.push(`${indent}  <alter>${alter}</alter>`);
+  lines.push(`${indent}  <octave>${pi.octave}</octave>`);
+  lines.push(`${indent}</pitch>`);
+  return lines;
+}
+
+/**
+ * Serialize a single note/rest event to MusicXML lines — including every
+ * pitch of a chord (as <chord/>-linked <note> siblings), ties, slurs,
+ * articulations, fermata, trill, tremolo, and the note-level dynamic.
+ * Only the FIRST (primary) pitch of a chord carries notations —
+ * articulations/fermata/ornaments/slurs/dynamics — matching both standard
+ * engraving practice and this app's own renderer, which only ever draws
+ * those on a chord's first notehead.
+ */
+function _noteEventToXmlLines(ev, indent, slurLayout, tieLinks, accCtx) {
+  const I  = indent;
+  const I2 = indent + '  ';
+  const lines = [];
+  const isRest    = ev.type === 'rest';
+  const dur       = ev.duration || 'quarter';
+  const divs      = RYM_TO_MXL_DIVS[dur] ?? 8;
+  const mxlType   = RYM_TO_MXL_TYPE[dur] || 'quarter';
+  const isDotted  = dur.endsWith('-dotted');
+  const isTriplet = dur.includes('triplet');
+
+  function durLines(target) {
+    target.push(`${I2}<duration>${divs}</duration>`);
+  }
+  function typeLines(target) {
+    target.push(`${I2}<type>${mxlType}</type>`);
+    if (isDotted) target.push(`${I2}<dot/>`);
+    if (isTriplet) {
+      target.push(`${I2}<time-modification>`);
+      target.push(`${I2}  <actual-notes>3</actual-notes>`);
+      target.push(`${I2}  <normal-notes>2</normal-notes>`);
+      target.push(`${I2}</time-modification>`);
+    }
   }
 
-  if (notLines.length) {
-    lines.push(`${I2}<notations>`);
-    lines.push(...notLines);
-    lines.push(`${I2}</notations>`);
+  if (isRest) {
+    lines.push(`${I}<note>`);
+    lines.push(`${I2}<rest/>`);
+    durLines(lines);
+    typeLines(lines);
+    lines.push(`${I}</note>`);
+    return lines;
   }
 
-  // Inline dynamic on the note itself
-  if (!isRest && ev.dynamic) {
-    lines.push(`${I2}<dynamics><${_escXml(ev.dynamic)}/></dynamics>`);
-  }
+  const pitches = Array.isArray(ev.pitches) && ev.pitches.length
+    ? ev.pitches
+    : [{ pitch: ev.pitch || 'C', accidental: ev.accidental ?? ev.acc ?? null, octave: ev.octave ?? 4 }];
 
-  lines.push(`${I}</note>`);
+  const slur     = slurLayout.get(ev._id) || { starts: [], stops: [] };
+  const tieStart = tieLinks.starts.has(ev._id);
+  const tieStop  = tieLinks.stops.has(ev._id);
+
+  pitches.forEach((pi, pIdx) => {
+    const isPrimary = pIdx === 0;
+    lines.push(`${I}<note>`);
+    if (!isPrimary) lines.push(`${I2}<chord/>`);
+    lines.push(..._pitchToXmlLines(pi, I2));
+    durLines(lines);
+
+    // Tie applies to the whole chord (this app tracks tie as a single
+    // per-event flag, not per pitch) — every pitch gets the same state.
+    if (tieStop)  lines.push(`${I2}<tie type="stop"/>`);
+    if (tieStart) lines.push(`${I2}<tie type="start"/>`);
+
+    typeLines(lines);
+
+    const show = _accidentalNeedsDisplay(accCtx, pi);
+    if (show) {
+      const accType = pi.accidental === '#' ? 'sharp' : pi.accidental === 'b' ? 'flat' : 'natural';
+      lines.push(`${I2}<accidental>${accType}</accidental>`);
+    }
+
+    const notLines = [];
+    if (isPrimary) {
+      if (tieStop)  notLines.push(`${I2}  <tied type="stop"/>`);
+      if (tieStart) notLines.push(`${I2}  <tied type="start"/>`);
+
+      slur.stops.forEach(n  => notLines.push(`${I2}  <slur type="stop" number="${n}"/>`));
+      slur.starts.forEach(n => notLines.push(`${I2}  <slur type="start" number="${n}"/>`));
+
+      const arts = ev.articulations || [];
+      const artLines = [];
+      if (ev.staccato || arts.includes('staccato')) artLines.push('<staccato/>');
+      if (arts.includes('accent'))  artLines.push('<accent/>');
+      if (arts.includes('tenuto'))  artLines.push('<tenuto/>');
+      if (arts.includes('marcato')) artLines.push('<strong-accent type="up"/>');
+      if (artLines.length) notLines.push(`${I2}  <articulations>${artLines.join('')}</articulations>`);
+
+      if (arts.includes('fermata')) notLines.push(`${I2}  <fermata type="upright"/>`);
+
+      const ornLines = [];
+      if (arts.includes('trill')) ornLines.push('<trill-mark/>');
+      if (ev.tremolo) ornLines.push(`<tremolo type="single">${ev.tremolo}</tremolo>`);
+      if (ornLines.length) notLines.push(`${I2}  <ornaments>${ornLines.join('')}</ornaments>`);
+
+      if (ev.dynamic) notLines.push(`${I2}  <dynamics><${_escXml(ev.dynamic)}/></dynamics>`);
+    }
+
+    if (notLines.length) {
+      lines.push(`${I2}<notations>`);
+      lines.push(...notLines);
+      lines.push(`${I2}</notations>`);
+    }
+
+    lines.push(`${I}</note>`);
+  });
+
   return lines;
 }
 
@@ -385,14 +625,98 @@ function _dynamicToXmlLines(ev, indent) {
   ];
 }
 
-/** Serialize a tempo / expression text direction. */
+/** Serialize a tempo / expression text direction.
+ *  Placement encodes subtype so import (which classifies subtype FROM
+ *  placement) round-trips correctly — "above" ⇄ tempo, "below" ⇄
+ *  expression. Previously this always wrote "above", which silently
+ *  turned every expression mark (pizz., con sord., dolce, ...) into a
+ *  tempo marking on any export→import cycle. */
 function _textMarkToXmlLines(ev, indent) {
+  const I  = indent;
+  const I2 = indent + '  ';
+  const placement = ev.subtype === 'tempo' ? 'above' : 'below';
+  return [
+    `${I}<direction placement="${placement}">`,
+    `${I2}<direction-type>`,
+    `${I2}  <words font-style="italic">${_escXml(ev.text)}</words>`,
+    `${I2}</direction-type>`,
+    `${I}</direction>`,
+  ];
+}
+
+/** Serialize a plain text token — currently only produced by
+ *  insertCapo() (type:'text'). Previously not exported at all because
+ *  export only checked for type:'text-mark'. */
+function _plainTextToXmlLines(ev, indent) {
   const I  = indent;
   const I2 = indent + '  ';
   return [
     `${I}<direction placement="above">`,
     `${I2}<direction-type>`,
-    `${I2}  <words font-style="italic">${_escXml(ev.text)}</words>`,
+    `${I2}  <words>${_escXml(ev.text || '')}</words>`,
+    `${I2}</direction-type>`,
+    `${I}</direction>`,
+  ];
+}
+
+function _rehearsalToXmlLines(ev, indent) {
+  const I  = indent;
+  const I2 = indent + '  ';
+  return [
+    `${I}<direction placement="above">`,
+    `${I2}<direction-type>`,
+    `${I2}  <rehearsal>${_escXml(ev.label || '')}</rehearsal>`,
+    `${I2}</direction-type>`,
+    `${I}</direction>`,
+  ];
+}
+
+function _segnoToXmlLines(indent) {
+  const I  = indent;
+  const I2 = indent + '  ';
+  return [
+    `${I}<direction placement="above">`,
+    `${I2}<direction-type><segno/></direction-type>`,
+    `${I2}<sound segno="segno1"/>`,
+    `${I}</direction>`,
+  ];
+}
+
+function _codaToXmlLines(indent) {
+  const I  = indent;
+  const I2 = indent + '  ';
+  return [
+    `${I}<direction placement="above">`,
+    `${I2}<direction-type><coda/></direction-type>`,
+    `${I2}<sound coda="coda1"/>`,
+    `${I}</direction>`,
+  ];
+}
+
+function _navToXmlLines(ev, indent) {
+  const I  = indent;
+  const I2 = indent + '  ';
+  const label     = NAV_LABELS[ev.nav] || ev.nav || '';
+  const soundAttr = NAV_SOUND_ATTR[ev.nav];
+  const out = [
+    `${I}<direction placement="above">`,
+    `${I2}<direction-type>`,
+    `${I2}  <words>${_escXml(label)}</words>`,
+    `${I2}</direction-type>`,
+  ];
+  if (soundAttr) out.push(`${I2}<sound ${soundAttr}/>`);
+  out.push(`${I}</direction>`);
+  return out;
+}
+
+function _pedalToXmlLines(ev, indent) {
+  const I  = indent;
+  const I2 = indent + '  ';
+  const type = ev.pedal === 'down' ? 'start' : 'stop';
+  return [
+    `${I}<direction placement="below">`,
+    `${I2}<direction-type>`,
+    `${I2}  <pedal type="${type}" line="yes"/>`,
     `${I2}</direction-type>`,
     `${I}</direction>`,
   ];
@@ -458,59 +782,90 @@ function exportMusicXML(parts, title) {
     const pid = `P${i + 1}`;
     lines.push(`  <part id="${pid}">`);
 
-    const measures = _buildExportMeasures(p);
+    const measures   = _buildExportMeasures(p);
+    const slurLayout = _computeSlurLayout(p);
+    const tieLinks   = _computeTieLinks(p);
+
+    let prevClef = null, prevKey = null, prevTimeSig = null;
 
     measures.forEach(m => {
       lines.push(`    <measure number="${m.number}">`);
 
-      // Attributes block — always on measure 1, or when something changed
-      const needAttrs = m.number === 1 || m.clefChanged || m.keyChanged || m.timeSigChanged;
+      const needAttrs = m.number === 1 ||
+        m.startClef !== prevClef || m.startKey !== prevKey || m.startTimeSig !== prevTimeSig;
+
       if (needAttrs) {
         lines.push('      <attributes>');
         lines.push(`        <divisions>${DIVISIONS}</divisions>`);
-
-        // Key
-        if (m.number === 1 || m.keyChanged) {
-          const fifths = _keyToFifths(m.key);
-          lines.push(`        <key><fifths>${fifths}</fifths></key>`);
+        if (m.number === 1 || m.startKey !== prevKey) {
+          lines.push(`        <key><fifths>${_keyToFifths(m.startKey)}</fifths></key>`);
         }
-
-        // Time
-        if (m.number === 1 || m.timeSigChanged) {
-          const [tsNum, tsDen] = (m.timeSig || '4/4').split('/');
+        if (m.number === 1 || m.startTimeSig !== prevTimeSig) {
+          const [tsNum, tsDen] = (m.startTimeSig || '4/4').split('/');
           lines.push(`        <time>`);
           lines.push(`          <beats>${tsNum}</beats>`);
           lines.push(`          <beat-type>${tsDen}</beat-type>`);
           lines.push(`        </time>`);
         }
-
-        // Clef
-        if (m.number === 1 || m.clefChanged) {
+        if (m.number === 1 || m.startClef !== prevClef) {
           lines.push(`        <clef>`);
-          lines.push(`          <sign>${_clefSign(m.clef)}</sign>`);
-          lines.push(`          <line>${_clefLine(m.clef)}</line>`);
+          lines.push(`          <sign>${_clefSign(m.startClef)}</sign>`);
+          lines.push(`          <line>${_clefLine(m.startClef)}</line>`);
           lines.push(`        </clef>`);
         }
-
         lines.push('      </attributes>');
       }
 
-      // Events
-      for (const ev of m.events) {
+      // Fresh per-measure accidental-carry state, reseeded on any
+      // mid-measure key change too (see the _attrChange branch below).
+      let accCtx = _newAccidentalCtx(m.startKey);
+      let runClef = m.startClef, runKey = m.startKey, runTimeSig = m.startTimeSig;
+
+      m.events.forEach(ev => {
+        if (ev._attrChange) {
+          lines.push('      <attributes>');
+          lines.push(`        <divisions>${DIVISIONS}</divisions>`);
+          if (ev.type === 'key') {
+            lines.push(`        <key><fifths>${_keyToFifths(ev.key)}</fifths></key>`);
+            accCtx = _newAccidentalCtx(ev.key);
+            runKey = ev.key;
+          } else if (ev.type === 'timesig') {
+            const [tsNum, tsDen] = (ev.timesig || '4/4').split('/');
+            lines.push(`        <time><beats>${tsNum}</beats><beat-type>${tsDen}</beat-type></time>`);
+            runTimeSig = ev.timesig;
+          } else if (ev.type === 'clef') {
+            lines.push(`        <clef><sign>${_clefSign(ev.clef)}</sign><line>${_clefLine(ev.clef)}</line></clef>`);
+            runClef = ev.clef;
+          }
+          lines.push('      </attributes>');
+          return;
+        }
+
         if (ev.type === 'note' || ev.type === 'rest') {
-          lines.push(..._noteToXmlLines(ev, '      '));
+          lines.push(..._noteEventToXmlLines(ev, '      ', slurLayout, tieLinks, accCtx));
         } else if (ev.type === 'dynamic') {
           lines.push(..._dynamicToXmlLines(ev, '      '));
         } else if (ev.type === 'text-mark') {
           lines.push(..._textMarkToXmlLines(ev, '      '));
+        } else if (ev.type === 'text') {
+          lines.push(..._plainTextToXmlLines(ev, '      '));
+        } else if (ev.type === 'rehearsal') {
+          lines.push(..._rehearsalToXmlLines(ev, '      '));
+        } else if (ev.type === 'segno') {
+          lines.push(..._segnoToXmlLines('      '));
+        } else if (ev.type === 'coda') {
+          lines.push(..._codaToXmlLines('      '));
+        } else if (ev.type === 'nav') {
+          lines.push(..._navToXmlLines(ev, '      '));
+        } else if (ev.type === 'pedal') {
+          lines.push(..._pedalToXmlLines(ev, '      '));
         } else if (ev.type === 'repeat') {
           lines.push(..._repeatToXmlLines(ev, '      '));
         }
-        // rehearsal, segno, coda, nav, pedal are omitted for brevity
-        // and could be added as additional cases here
-      }
+      });
 
       lines.push('    </measure>');
+      prevClef = runClef; prevKey = runKey; prevTimeSig = runTimeSig;
     });
 
     lines.push('  </part>');
@@ -572,13 +927,21 @@ function importMusicXML(xmlString) {
     let initialKey     = null;
     let initialTimeSig = null;
 
+    // Chord grouping: a <chord/> note extends the immediately preceding
+    // note event with an extra pitch instead of starting a new one.
+    let pendingChordHead = null;
+
     const measureEls = [...partEl.querySelectorAll('measure')];
 
     measureEls.forEach((mEl, mi) => {
 
       // ── <attributes> ──────────────────────────────────────────────
-      const attrEl = mEl.querySelector('attributes');
-      if (attrEl) {
+      // NOTE: a measure can legally contain more than one <attributes>
+      // block (a mid-measure clef/key/time change) — querySelectorAll
+      // (not querySelector) so every one of them is applied, not just
+      // the first, matching what the on-screen renderer does when the
+      // score was authored with a "Score → Here" change.
+      mEl.querySelectorAll('attributes').forEach(attrEl => {
         const divEl = attrEl.querySelector('divisions');
         if (divEl) divisions = parseInt(divEl.textContent) || 1;
 
@@ -586,7 +949,7 @@ function importMusicXML(xmlString) {
         if (fifthsEl) {
           const newKey = _fifthsToKey(parseInt(fifthsEl.textContent) || 0);
           if (newKey !== key) {
-            if (mi > 0) notes.push({ _id: _uid(), type: 'key', key: newKey });
+            if (mi > 0 || initialKey !== null) notes.push({ _id: _uid(), type: 'key', key: newKey });
             key = newKey;
           }
         }
@@ -596,7 +959,7 @@ function importMusicXML(xmlString) {
         if (beatsEl && beatTypeEl) {
           const newTS = `${beatsEl.textContent.trim()}/${beatTypeEl.textContent.trim()}`;
           if (newTS !== timeSig) {
-            if (mi > 0) notes.push({ _id: _uid(), type: 'timesig', timesig: newTS });
+            if (mi > 0 || initialTimeSig !== null) notes.push({ _id: _uid(), type: 'timesig', timesig: newTS });
             timeSig = newTS;
           }
         }
@@ -609,31 +972,74 @@ function importMusicXML(xmlString) {
             clefLineEl?.textContent?.trim()
           );
           if (newClef !== clef) {
-            if (mi > 0) notes.push({ _id: _uid(), type: 'clef', clef: newClef });
+            if (mi > 0 || initialClef !== null) notes.push({ _id: _uid(), type: 'clef', clef: newClef });
             clef = newClef;
           }
         }
 
-        // Capture initial state once
+        // Capture initial state from the FIRST <attributes> block only.
         if (initialClef    === null) initialClef    = clef;
         if (initialKey     === null) initialKey     = key;
         if (initialTimeSig === null) initialTimeSig = timeSig;
-      }
+      });
 
       // ── <direction> ───────────────────────────────────────────────
       mEl.querySelectorAll('direction').forEach(dEl => {
-        // Dynamics
+        // Dynamics (standalone — a swatch inserted between notes)
         const dynEl = dEl.querySelector('dynamics');
         if (dynEl?.firstElementChild) {
           notes.push({ _id: _uid(), type: 'dynamic', dynamic: dynEl.firstElementChild.tagName });
           return;
         }
-        // Tempo / expression text
-        const wordsEl = dEl.querySelector('words');
+
+        // Rehearsal marks — dedicated element, not text.
+        const rehearsalEl = dEl.querySelector('direction-type > rehearsal');
+        if (rehearsalEl) {
+          notes.push({ _id: _uid(), type: 'rehearsal', label: rehearsalEl.textContent.trim() });
+          return;
+        }
+
+        // Segno / Coda — dedicated elements.
+        if (dEl.querySelector('direction-type > segno')) {
+          notes.push({ _id: _uid(), type: 'segno' });
+          return;
+        }
+        if (dEl.querySelector('direction-type > coda')) {
+          notes.push({ _id: _uid(), type: 'coda' });
+          return;
+        }
+
+        // Pedal — dedicated element.
+        const pedalEl = dEl.querySelector('direction-type > pedal');
+        if (pedalEl) {
+          const pType = pedalEl.getAttribute('type');
+          notes.push({ _id: _uid(), type: 'pedal', pedal: (pType === 'stop') ? 'up' : 'down' });
+          return;
+        }
+
+        // Words: could be a nav mark (Fine / D.S. al Coda / …), a Capo
+        // marking, a tempo text, or a general expression text — checked
+        // in that order, since nav-mark and Capo text are both recognized
+        // by exact shape; anything else falls back to the placement-based
+        // tempo/expression split (see _textMarkToXmlLines for the
+        // matching export-side convention).
+        const wordsEl = dEl.querySelector('direction-type > words');
         if (wordsEl) {
+          const text = wordsEl.textContent.trim();
+
+          if (NAV_LABELS_REV[text]) {
+            notes.push({ _id: _uid(), type: 'nav', nav: NAV_LABELS_REV[text] });
+            return;
+          }
+
+          if (/^Capo\s+\d+$/i.test(text)) {
+            notes.push({ _id: _uid(), type: 'text', text, subtype: 'expression' });
+            return;
+          }
+
           const placement = dEl.getAttribute('placement') || 'above';
           const subtype   = placement === 'above' ? 'tempo' : 'expression';
-          notes.push({ _id: _uid(), type: 'text-mark', text: wordsEl.textContent.trim(), subtype });
+          notes.push({ _id: _uid(), type: 'text-mark', text, subtype });
         }
       });
 
@@ -649,10 +1055,22 @@ function importMusicXML(xmlString) {
       // ── <note> ────────────────────────────────────────────────────
       mEl.querySelectorAll('note').forEach(nEl => {
         const isRest  = !!nEl.querySelector('rest');
-        const isChord = !!nEl.querySelector('chord');   // chord note — attach to previous head
+        const isChord = !!nEl.querySelector('chord');
         const typeEl  = nEl.querySelector('type');
         const dotEls  = nEl.querySelectorAll('dot');
         const timeMod = nEl.querySelector('time-modification');
+
+        // A <chord/> note is an EXTRA pitch on the previous note event,
+        // not a new rhythmic event — merge it in and stop.
+        if (isChord && !isRest && pendingChordHead) {
+          const pitch  = nEl.querySelector('pitch > step')?.textContent?.trim() || 'C';
+          const octave = parseInt(nEl.querySelector('pitch > octave')?.textContent) || 4;
+          const alter  = parseFloat(nEl.querySelector('pitch > alter')?.textContent || '0');
+          const accidental  = alter === 1 ? '#' : alter === -1 ? 'b' : null;
+          const accExplicit = !!nEl.querySelector('accidental');
+          pendingChordHead.pitches.push({ pitch, accidental, octave, accExplicit });
+          return;
+        }
 
         const isTriplet = timeMod
           && parseInt(timeMod.querySelector('actual-notes')?.textContent) === 3
@@ -661,11 +1079,9 @@ function importMusicXML(xmlString) {
         const mxlType = typeEl?.textContent?.trim() || 'quarter';
         let rymDur    = MXL_TYPE_TO_RYM[mxlType] || 'quarter';
 
-        // Apply dot / triplet modifiers
         if (isTriplet && rymDur === 'quarter') {
           rymDur = 'quarter-triplet';
         } else if (dotEls.length > 0) {
-          // Only add '-dotted' if we recognise this duration as dot-able
           const dotted = rymDur + '-dotted';
           if (DUR_BEATS[dotted] !== undefined) rymDur = dotted;
         }
@@ -677,20 +1093,26 @@ function importMusicXML(xmlString) {
         };
 
         if (!isRest) {
-          ev.pitch  = nEl.querySelector('pitch > step')?.textContent?.trim() || 'C';
-          ev.octave = parseInt(nEl.querySelector('pitch > octave')?.textContent) || 4;
+          const pitch  = nEl.querySelector('pitch > step')?.textContent?.trim() || 'C';
+          const octave = parseInt(nEl.querySelector('pitch > octave')?.textContent) || 4;
+          const alter  = parseFloat(nEl.querySelector('pitch > alter')?.textContent || '0');
+          const accidental  = alter === 1 ? '#' : alter === -1 ? 'b' : null;
+          const accExplicit = !!nEl.querySelector('accidental');
 
-          const alter = parseFloat(nEl.querySelector('pitch > alter')?.textContent || '0');
-          ev.accidental = alter === 1 ? '#' : alter === -1 ? 'b' : null;
+          ev.pitch  = pitch;
+          ev.octave = octave;
+          ev.accidental = accidental;
+          if (accExplicit) ev.accExplicit = true;
+          ev.pitches = [{ pitch, accidental, octave, accExplicit }];
 
-          // Show the accidental glyph if MusicXML has an <accidental> element
-          if (nEl.querySelector('accidental')) ev.accExplicit = true;
-
-          // Tie
+          // Tie: only a <tie type="start"/> sets our tie flag — matching
+          // the export convention (ev.tie === true → ties FORWARD into
+          // the next matching note). A stop-only tie (the second half of
+          // a pair) needs no flag on this side; it's implied by the
+          // previous note's start.
           const tieStartEl = [...nEl.querySelectorAll('tie')].find(t => t.getAttribute('type') === 'start');
           if (tieStartEl) ev.tie = true;
 
-          // Articulations
           const notationsEl = nEl.querySelector('notations');
           if (notationsEl) {
             const arts = [];
@@ -698,13 +1120,13 @@ function importMusicXML(xmlString) {
             if (notationsEl.querySelector('articulations accent'))             arts.push('accent');
             if (notationsEl.querySelector('articulations tenuto'))             arts.push('tenuto');
             if (notationsEl.querySelector('articulations strong-accent'))      arts.push('marcato');
+            if (notationsEl.querySelector('fermata'))                         arts.push('fermata');
+            if (notationsEl.querySelector('ornaments trill-mark'))            arts.push('trill');
             if (arts.length) ev.articulations = arts;
 
-            // Tremolo
             const tremEl = notationsEl.querySelector('ornaments tremolo');
             if (tremEl) ev.tremolo = parseInt(tremEl.textContent) || 1;
 
-            // Slurs
             notationsEl.querySelectorAll('slur').forEach(slurEl => {
               const slurType = slurEl.getAttribute('type');
               const slurNum  = slurEl.getAttribute('number') || '1';
@@ -715,20 +1137,35 @@ function importMusicXML(xmlString) {
                 delete openSlurs[slurNum];
               }
             });
+
+            const notedDynEl = notationsEl.querySelector('dynamics');
+            if (notedDynEl?.firstElementChild) ev.dynamic = notedDynEl.firstElementChild.tagName;
+          }
+
+          // Fallback for a stray note-level <dynamics> not nested inside
+          // <notations> (invalid per-schema, but tolerate other tools'
+          // output defensively).
+          if (!ev.dynamic) {
+            const looseDynEl = nEl.querySelector('dynamics');
+            if (looseDynEl?.firstElementChild) ev.dynamic = looseDynEl.firstElementChild.tagName;
           }
         }
 
-        // Note-level dynamic (unusual but valid in MusicXML)
-        const noteDynEl = nEl.querySelector('dynamics');
-        if (noteDynEl?.firstElementChild) {
-          ev.dynamic = noteDynEl.firstElementChild.tagName;
-        }
-
-        // Chord notes: in Rymspace's model there's no native chord support,
-        // so chord notes are imported as independent notes.  This is a known
-        // simplification — chords deserving first-class support is a future feature.
         notes.push(ev);
+        pendingChordHead = isRest ? null : ev;
       });
+    });
+
+    // Normalize chord pitch order (ascending) and keep the primary
+    // pitch/octave/accidental fields in sync with pitches[0] — matches
+    // the invariant the editor itself maintains (app.js's chordAddPitch()
+    // keeps pitches[] sorted ascending after every chord edit).
+    notes.forEach(ev => {
+      if (ev.type !== 'note' || !Array.isArray(ev.pitches) || !ev.pitches.length) return;
+      if (ev.pitches.length > 1) ev.pitches.sort((a, b) => _chromOf(a) - _chromOf(b));
+      const p0 = ev.pitches[0];
+      ev.pitch = p0.pitch; ev.octave = p0.octave; ev.accidental = p0.accidental;
+      ev.accExplicit = !!p0.accExplicit;
     });
 
     return {
