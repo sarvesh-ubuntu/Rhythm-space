@@ -36,14 +36,25 @@
  * ─── Known deferred features (not yet ported from the old hand-drawn
  *      renderer — these are stubbed as plain text annotations for now
  *      rather than silently dropped) ───────────────────────────────────
- *   - Hairpins (cresc./decresc. wedges) — TODO: Vex.Flow.StaveHairpin
  *   - Pedal marks, segno/coda glyphs, D.S./D.C. nav marks, tremolo beams
- *   - Grace notes
  *   - True tuplet grouping/bracketing for triplets — currently rendered
  *     as plain eighth notes with a "3" text annotation (same simplified
  *     behavior the old renderer had; not a regression).
  * These are all reasonably small additions on top of this structure —
  * flag them if you want them next.
+ *
+ * ─── v6.1 — Hairpins + grace notes ────────────────────────────────────
+ * Hairpins render via VF.StaveHairpin (see _drawPartHairpins), using the
+ * same fromId/toId/_noteGeoms lookup pattern as slurs. Grace notes
+ * (ev.grace) render via VF.GraceNote + VF.GraceNoteGroup — VexFlow has no
+ * concept of a grace note standing alone; consecutive grace-flagged
+ * events are buffered in _buildMeasureNotes and attached as a modifier
+ * group to the very next real (non-grace) note. Neither of these has
+ * been visually confirmed on an actual screen (no browser in this
+ * environment) — the VexFlow object construction and attachment calls
+ * were verified against vexflow@4.2.2's own source/test suite to at
+ * least rule out API-mismatch bugs, but please flag anything that looks
+ * visually wrong once you've run it.
  *
  * THIS IS A FIRST PORT, NOT A PIXEL-VERIFIED ONE. I don't have a browser
  * in this environment to visually check canvas + VexFlow output, so please
@@ -148,6 +159,13 @@ const MIN_NOTES_WIDTH = 200;
 // enough room for its own glyphs/barline.
 const EMPTY_MEASURE_WIDTH = 26;
 
+// Grace notes aren't part of the counted voice VexFlow's own width
+// estimate is based on (see _measureVexInfo), so that estimate doesn't
+// reserve any room for their glyphs on its own — this is a small fixed
+// per-grace-note allowance added on top, just enough that a grace note
+// doesn't render crammed directly against its principal note's stem.
+const GRACE_WIDTH_ALLOWANCE = 16;
+
 // Every row always stretches to fill the full line width — the staff is
 // fixed-width like real paper. Note spacing adjusts proportionally to
 // content density; the line itself never shrinks.
@@ -223,7 +241,17 @@ const DUR_TO_VF = {
   'thirty-second':  '32'
 };
 
+/**
+ * Beat contribution of an event. Grace notes (ev.grace) always contribute
+ * ZERO beats regardless of their nominal duration — they borrow a sliver
+ * of time from whatever follows rather than occupying counted rhythm, so
+ * they never trigger a measure split and don't consume beat capacity.
+ * This one change is what buildMeasures(), measureSpaceAt(), and (via
+ * playback.js calling this same function) the audio scheduler all rely
+ * on for consistent grace-note behavior.
+ */
 function beatOf(evOrDur) {
+  if (evOrDur && typeof evOrDur === 'object' && evOrDur.grace) return 0;
   const d = typeof evOrDur === 'string' ? evOrDur : (evOrDur && evOrDur.duration);
   return DUR_BEATS[d] ?? 0;
 }
@@ -734,6 +762,20 @@ function _splitGrandStaffEvents(measure) {
       const avgChrom = pitches.reduce((s, pi) =>
         s + noteToChrom(pi.pitch, pi.accidental ?? pi.acc ?? null, pi.octave), 0) / pitches.length;
       const toTreble = avgChrom >= C4;
+
+      if (ev.grace) {
+        // Grace notes take no measured time, so there's nothing to
+        // "fill" in the other staff the way a real note needs a filler
+        // rest — routing a synthetic 0-duration grace filler into the
+        // other stream would desync the two staves' total tick counts
+        // (one stream would carry a real-duration filler rest for an
+        // event that contributes zero ticks everywhere else). Just route
+        // it to whichever staff its pitch belongs on and leave the other
+        // staff alone.
+        (toTreble ? trebleEvents : bassEvents).push(ev);
+        return;
+      }
+
       trebleEvents.push(toTreble ? ev : { ...ev, type: 'rest', _synthetic: true });
       bassEvents.push(!toTreble ? ev : { ...ev, type: 'rest', _synthetic: true });
     } else if (ev.type === 'rest') {
@@ -754,10 +796,13 @@ function _splitGrandStaffEvents(measure) {
 
 // Build VexFlow TabNote/GhostNote tickables for one measure of a
 // plucked-strings part, from the `ev.tab.positions` data app.js's
-// chooseTabForNote() already attaches to each note event.
+// chooseTabForNote() already attaches to each note event. Grace notes
+// are skipped here (the TAB staff doesn't show them) — they're excluded
+// from the main notation voice too (see _buildMeasureNotes), so leaving
+// them out here keeps both voices' rhythmic totals equal.
 function _buildTabNotesForMeasure(VF, measure) {
   const notes = measure.events
-    .filter(ev => ev.type === 'note' || ev.type === 'rest')
+    .filter(ev => (ev.type === 'note' || ev.type === 'rest') && !ev.grace)
     .sort((a, b) => (a.index ?? 0) - (b.index ?? 0))
     .map(ev => {
       const isDotted = ev.duration && ev.duration.endsWith('-dotted');
@@ -818,6 +863,14 @@ function _restKeyForClef(clef) {
  * plus VexFlow tie objects for same-measure (and, via tieCarry,
  * cross-measure) ties.
  *
+ * Grace notes (ev.grace) are never added to the returned `notes[]`
+ * tickables array — VexFlow has no concept of a grace note as an
+ * independent counted tickable; it must be attached as a modifier
+ * (VF.GraceNoteGroup) to the note it leads into. Consecutive grace events
+ * are buffered as they're encountered and flushed onto the next real
+ * (non-grace) note/rest as soon as one is built. They still get an entry
+ * in noteMeta (for cursor/hit-test geometry), just not in notes[].
+ *
  * @param {object} [tieCarry] Optional per-part mutable state
  *   ({ pending }) used to thread an open tie across a measure boundary.
  *   Pass the SAME object across sequential calls for a given part, in
@@ -844,10 +897,65 @@ function _buildMeasureNotes(VF, measure, partIdx, tieCarry) {
   // scope silently dropped any tie that did.
   let pendingTieFrom = (tieCarry && tieCarry.pending) || null; // { ev, vexNote }
 
+  // Buffered grace notes waiting for the next real note/rest to attach to.
+  let pendingGrace = []; // { ev, vexNote }
+
+  function _buildChordKeys(ev) {
+    const chordPitches = Array.isArray(ev.pitches) && ev.pitches.length
+      ? ev.pitches
+      : [{ pitch:ev.pitch, accidental:ev.accidental || ev.acc || null, octave:ev.octave }];
+    return chordPitches.map(pi => {
+      const resolved = normalizeAcc(pi.accidental || pi.acc);
+      const accSuffix = resolved === '#' ? '#' : resolved === 'b' ? 'b' : '';
+      return `${pi.pitch.toLowerCase()}${accSuffix}/${pi.octave}`;
+    });
+  }
+
+  function _flushGraceOnto(principalVexNote) {
+    if (!pendingGrace.length) return;
+    try {
+      const group = new VF.GraceNoteGroup(pendingGrace.map(g => g.vexNote), false).beamNotes();
+      principalVexNote.addModifier(group, 0);
+    } catch (err) {
+      console.warn('rhythm space: grace note group attach failed', err);
+    }
+    pendingGrace.forEach(g => {
+      noteMeta.push({ ev: g.ev, vexNote: g.vexNote, _isGrace: true, _principal: principalVexNote });
+    });
+    pendingGrace = [];
+  }
+
   for (const ev of sortedEvents) {
     const isDotted  = ev.duration && ev.duration.endsWith('-dotted');
     const isTriplet = ev.duration === 'quarter-triplet';
     const baseDur   = DUR_TO_VF[ev.duration] || 'q';
+
+    // ── Grace notes: build small, buffer, never push to notes[] ──────
+    if (ev.type === 'note' && ev.grace) {
+      let graceNote;
+      try {
+        graceNote = new VF.GraceNote({ clef, keys: _buildChordKeys(ev), duration: baseDur, slash: true });
+        const accInfo = accidentalInfo.get(ev.index) || {};
+        if (accInfo.displayAcc) graceNote.addModifier(new VF.Accidental(accInfo.displayAcc), 0);
+
+        const arts = ev.articulations || [];
+        if (ev.staccato || arts.includes('staccato')) {
+          graceNote.addModifier(new VF.Articulation('a.').setPosition(VF.Modifier.Position.ABOVE), 0);
+        }
+        if (arts.includes('accent')) {
+          graceNote.addModifier(new VF.Articulation('a>').setPosition(VF.Modifier.Position.ABOVE), 0);
+        }
+        if (arts.includes('tenuto')) {
+          graceNote.addModifier(new VF.Articulation('a-').setPosition(VF.Modifier.Position.ABOVE), 0);
+        }
+        if (isDotted && graceNote.addDotToAll) graceNote.addDotToAll();
+      } catch (err) {
+        console.warn('rhythm space: grace note build failed for an event', err);
+        continue;
+      }
+      pendingGrace.push({ ev, vexNote: graceNote });
+      continue;
+    }
 
     let vexNote;
 
@@ -855,15 +963,7 @@ function _buildMeasureNotes(VF, measure, partIdx, tieCarry) {
       vexNote = new VF.StaveNote({ clef, keys: [_restKeyForClef(clef)], duration: baseDur + 'r' });
       pendingTieFrom = null;
     } else {
-      const chordPitches = Array.isArray(ev.pitches) && ev.pitches.length
-        ? ev.pitches
-        : [{ pitch:ev.pitch, accidental:ev.accidental || ev.acc || null, octave:ev.octave }];
-      const keys = chordPitches.map(pi => {
-        const resolved = normalizeAcc(pi.accidental || pi.acc);
-        const accSuffix = resolved === '#' ? '#' : resolved === 'b' ? 'b' : '';
-        return `${pi.pitch.toLowerCase()}${accSuffix}/${pi.octave}`;
-      });
-
+      const keys = _buildChordKeys(ev);
       vexNote = new VF.StaveNote({ clef, keys, duration: baseDur });
 
       const accInfo = accidentalInfo.get(ev.index) || {};
@@ -925,8 +1025,22 @@ function _buildMeasureNotes(VF, measure, partIdx, tieCarry) {
 
     if (isDotted && vexNote.addDotToAll) vexNote.addDotToAll();
 
+    // Attach any buffered grace notes to this principal note BEFORE
+    // pushing it — a grace note always leads into the very next real
+    // note or rest, never floats independently.
+    _flushGraceOnto(vexNote);
+
     notes.push(vexNote);
     noteMeta.push({ ev, vexNote });
+  }
+
+  // Dangling grace notes with nothing left to attach to in this measure
+  // (typically the very last thing typed so far, mid-edit) can't be
+  // rendered as a VexFlow grace group without a principal note — skipped
+  // for THIS render pass only; nothing is lost from the data, and they
+  // reappear automatically as soon as a following note exists.
+  if (pendingGrace.length) {
+    console.warn(`rhythm space: ${pendingGrace.length} grace note(s) at end of measure with no following note — skipped for this render`);
   }
 
   // Hand off any still-open tie to whatever measure gets built next for
@@ -980,6 +1094,13 @@ function _measureVexInfo(VF, measure, isFirst) {
       notesMinWidth = Math.max(MIN_NOTES_WIDTH, built.notes.length * 34 * NOTE_COMFORT);
     }
   }
+
+  // Grace notes aren't part of the counted voice above, so VexFlow's own
+  // estimate doesn't reserve room for their glyphs — add a small fixed
+  // allowance per grace note so they don't render cramped against their
+  // principal note.
+  const graceCount = measure.events.filter(ev => ev.type === 'note' && ev.grace).length;
+  if (graceCount) notesMinWidth += graceCount * GRACE_WIDTH_ALLOWANCE;
 
   // Width this measure needs when it opens a continuation row —
   // real notation always shows a courtesy clef (+ key sig if not C major).
@@ -1253,12 +1374,26 @@ function render(canvas, parts, global) {
         beams.forEach(b => b.setContext(ctx).draw());
         built.ties.forEach(t => t.setContext(ctx).draw());
 
-        built.noteMeta.forEach(({ ev, vexNote }) => {
+        built.noteMeta.forEach(({ ev, vexNote, _isGrace, _principal }) => {
           // Synthetic filler rests (the "other hand" of a grand-staff split)
           // exist only to keep the voice metrically complete — they aren't
           // real events, so skip geometry/hit-testing/cursor bookkeeping.
           if (ev._synthetic) return;
-          const gx = vexNote.getAbsoluteX();
+
+          // Grace notes are nested inside a GraceNoteGroup modifier rather
+          // than being independent Voice tickables, so their absolute
+          // position is only meaningful once VexFlow has formatted that
+          // modifier (which happens as part of the draw pass above). Fall
+          // back to sitting just left of the principal note if that
+          // doesn't resolve to a sane number for any reason, rather than
+          // leaving the event un-clickable.
+          let gx;
+          try {
+            gx = vexNote.getAbsoluteX();
+            if (!Number.isFinite(gx) && _principal) gx = _principal.getAbsoluteX() - 6;
+          } catch (_) {
+            gx = _principal ? _principal.getAbsoluteX() - 6 : stave.getX();
+          }
           const gy = stopTop + 2 * LS;
           _rememberEventGeom(pi, ev, gx, gy, stopTop);
           noteAnchors.push({ ev, x: gx, y: gy, vexNote });
@@ -1382,9 +1517,10 @@ function render(canvas, parts, global) {
     }
   });
 
-  // ── Slurs (post-pass, uses _noteGeoms so they can span rows) ─────────
+  // ── Slurs + hairpins (post-pass, uses _noteGeoms so they can span rows) ──
   for (let pi = 0; pi < numParts; pi++) {
     _drawPartSlurs(VF, ctx, parts[pi].slurs || [], pi);
+    _drawPartHairpins(VF, ctx, parts[pi].hairpins || [], pi);
   }
 
   // ── Cursor ─────────────────────────────────────────────────────────
@@ -1677,7 +1813,7 @@ function _drawNoteMarkers(ctx, vexNote, x, y, ev, partIdx, global) {
 }
 
 // ═══════════════════════════════════════════════════════════════════
-//  SLURS
+//  SLURS + HAIRPINS
 // ═══════════════════════════════════════════════════════════════════
 
 function _drawPartSlurs(VF, ctx, slurs, partIdx) {
@@ -1690,6 +1826,22 @@ function _drawPartSlurs(VF, ctx, slurs, partIdx) {
       curve.setContext(ctx).draw();
     } catch (err) {
       console.warn('rhythm space: slur draw failed (likely cross-row — needs Curve position options)', err);
+    }
+  }
+}
+
+function _drawPartHairpins(VF, ctx, hairpins, partIdx) {
+  for (const hp of hairpins) {
+    const g0 = _noteGeoms.get(`${partIdx}_${hp.fromId}`);
+    const g1 = _noteGeoms.get(`${partIdx}_${hp.toId}`);
+    if (!g0 || !g1 || !g0.vexNote || !g1.vexNote) continue;
+    try {
+      const type = hp.type === 'decresc' ? VF.StaveHairpin.type.DECRESC : VF.StaveHairpin.type.CRESC;
+      const hairpin = new VF.StaveHairpin({ first_note: g0.vexNote, last_note: g1.vexNote }, type);
+      hairpin.setPosition(VF.Modifier.Position.BELOW);
+      hairpin.setContext(ctx).draw();
+    } catch (err) {
+      console.warn('rhythm space: hairpin draw failed (likely cross-row)', err);
     }
   }
 }
