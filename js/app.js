@@ -1081,40 +1081,38 @@ async function handleExportXML() {
   toast('Exported as MusicXML');
 }
  
+function loadXmlString(raw) {
+  try {
+    const result = window.MusicXML.importMusicXML(raw);
+
+    if (!result.parts || result.parts.length === 0) {
+      toast('No parts found in MusicXML file');
+      return;
+    }
+
+    saveState();   // push current score onto undo stack so it's recoverable
+    parts = result.parts.map(migratePart);
+    activePart = 0;
+    setCloudSheetId('');
+    currentFileHandle = null;
+
+    if (result.title) {
+      document.getElementById('comp-title').value = result.title;
+    }
+
+    afterMutation();
+    toast(`Imported "${result.title || 'Score'}" — ${result.parts.length} part(s)`);
+  } catch (err) {
+    toast('Import failed: ' + err.message);
+  }
+}
+
 /** Import a .musicxml / .xml file and replace the current score. */
 async function handleImportXML() {
   if (!window.MusicXML) {
     toast('MusicXML module not loaded');
     return;
   }
- 
-  // Helper that does the actual import once we have the raw XML string
-  function loadXmlString(raw) {
-    try {
-      const result = window.MusicXML.importMusicXML(raw);
- 
-      if (!result.parts || result.parts.length === 0) {
-        toast('No parts found in MusicXML file');
-        return;
-      }
- 
-      saveState();   // push current score onto undo stack so it's recoverable
-      parts = result.parts.map(migratePart);
-      activePart = 0;
-      setCloudSheetId('');
-      currentFileHandle = null;
- 
-      if (result.title) {
-        document.getElementById('comp-title').value = result.title;
-      }
- 
-      afterMutation();
-      toast(`Imported "${result.title || 'Score'}" — ${result.parts.length} part(s)`);
-    } catch (err) {
-      toast('Import failed: ' + err.message);
-    }
-  }
- 
   // Try File System Access API first
   if (window.showOpenFilePicker) {
     try {
@@ -1146,6 +1144,86 @@ async function handleImportXML() {
     if (!file) return;
     loadXmlString(await file.text());
   };
+  input.click();
+}
+
+/** Upload image/PDF, run OMR via Hugging Face/Cloudflare Worker proxy, and import. */
+async function handleScanOMR() {
+  if (!window.MusicXML) {
+    toast('MusicXML module not loaded');
+    return;
+  }
+
+  const input = document.createElement('input');
+  input.type = 'file';
+  input.accept = 'image/png, image/jpeg, application/pdf';
+  
+  input.onchange = async (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    let scanToast = toast('Uploading sheet music...', { duration: 0 });
+
+    try {
+      const formData = new FormData();
+      formData.append('file', file);
+
+      const userId = window.RymAuth && window.RymAuth.getCurrentUser()?.uid;
+      const headers = {};
+      if (userId) {
+        headers['X-Rym-User-Id'] = userId;
+      }
+
+      // Step 1: Start prediction to get task_id
+      const res = await fetch('/api/sheets/omr/predict', {
+        method: 'POST',
+        headers: headers,
+        body: formData
+      });
+
+      if (!res.ok) {
+        const text = await res.text().catch(() => '');
+        throw new Error(text || `Server returned ${res.status}`);
+      }
+      
+      const { task_id } = await res.json();
+      if (!task_id) throw new Error('No task ID returned');
+
+      // Step 2: Poll for status
+      const pollInterval = setInterval(async () => {
+        try {
+          const statusRes = await fetch(`/api/sheets/omr/status/${task_id}`, { headers });
+          if (!statusRes.ok) throw new Error(`Status check failed (${statusRes.status})`);
+          
+          const statusData = await statusRes.json();
+          
+          if (statusData.status === 'done') {
+            clearInterval(pollInterval);
+            scanToast.remove();
+            loadXmlString(statusData.result);
+            toast('Sheet music successfully scanned and imported!');
+          } else if (statusData.status === 'error') {
+            clearInterval(pollInterval);
+            scanToast.remove();
+            toast(`OMR Error: ${statusData.error}`);
+          } else {
+            // Update toast message with current progress
+            scanToast.innerText = `OMR: ${statusData.status}`;
+          }
+        } catch (err) {
+          clearInterval(pollInterval);
+          scanToast.remove();
+          toast(`Polling error: ${err.message}`);
+        }
+      }, 3000);
+      
+    } catch (err) {
+      console.error(err);
+      if (scanToast) scanToast.remove();
+      toast(`Scanning failed: ${err.message}`);
+    }
+  };
+
   input.click();
 }
 
@@ -1797,6 +1875,7 @@ function wire(id, fn) {
   if (el) el.addEventListener('click', fn);
 }
 wire('btn-import-xml', () => handleImportXML());
+wire('btn-scan-omr', () => handleScanOMR());
 wire('btn-export-xml', () => handleExportXML());
 wire('btn-add-part',  () => openAddPartModal());
 wire('btn-parts',     e  => toggleMenu('parts-menu', e.currentTarget));

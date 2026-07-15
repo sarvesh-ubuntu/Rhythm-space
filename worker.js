@@ -27,6 +27,34 @@ async function handleRequest(request, env) {
 
   await ensureSchema(env.DB);
 
+  // OMR Proxy Routes
+  if (url.pathname === '/api/sheets/omr/predict' && request.method === 'POST') {
+    const hfSpaceUrl = 'https://YOUR_HF_USERNAME-YOUR_SPACE_NAME.hf.space/predict';
+    try {
+      const hfResponse = await fetch(hfSpaceUrl, {
+        method: 'POST',
+        body: request.body,
+        headers: { 'Accept': 'application/json' }
+      });
+      if (!hfResponse.ok) return json({ error: `OMR Server Error: ${await hfResponse.text()}` }, hfResponse.status);
+      return new Response(await hfResponse.text(), { headers: { 'Content-Type': 'application/json; charset=utf-8' } });
+    } catch (err) {
+      return json({ error: `Failed to contact OMR backend: ${err.message}` }, 502);
+    }
+  }
+
+  if (url.pathname.startsWith('/api/sheets/omr/status/') && request.method === 'GET') {
+    const taskId = url.pathname.split('/').pop();
+    const hfSpaceUrl = `https://YOUR_HF_USERNAME-YOUR_SPACE_NAME.hf.space/status/${taskId}`;
+    try {
+      const hfResponse = await fetch(hfSpaceUrl);
+      if (!hfResponse.ok) return json({ error: `OMR Server Error: ${await hfResponse.text()}` }, hfResponse.status);
+      return new Response(await hfResponse.text(), { headers: { 'Content-Type': 'application/json; charset=utf-8' } });
+    } catch (err) {
+      return json({ error: `Failed to contact OMR backend: ${err.message}` }, 502);
+    }
+  }
+
   const sheetId = url.pathname.split('/').filter(Boolean)[2] || '';
 
   if (request.method === 'GET' && !sheetId) {
