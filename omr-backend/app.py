@@ -44,39 +44,6 @@ except ImportError:
 AUDIVERIS_BIN = os.environ.get("AUDIVERIS_BIN") or shutil.which("Audiveris") or "Audiveris"
 
 
-def merge_musicxml(xml_files):
-    """Merge one MusicXML file per page into a single document by
-    concatenating each page's <measure> elements into the first page's
-    <part>.
-
-    Assumes each page's exported score has exactly one <part> (i.e. a
-    single-instrument score — solo piano, solo violin, etc.). A
-    multi-instrument score would need per-part merging instead; that's
-    a pre-existing limitation carried over from the oemer version, not
-    something specific to the Audiveris switch.
-    """
-    if not xml_files:
-        return ""
-    if len(xml_files) == 1:
-        with open(xml_files[0], "r", encoding="utf-8") as f:
-            return f.read()
-
-    base_tree = ET.parse(xml_files[0])
-    base_root = base_tree.getroot()
-    base_part = base_root.find("part")
-    if base_part is None:
-        raise ValueError("Invalid MusicXML: no <part> found in the base page.")
-
-    for xml_file in xml_files[1:]:
-        tree = ET.parse(xml_file)
-        part = tree.getroot().find("part")
-        if part is not None:
-            for measure in part.findall("measure"):
-                base_part.append(measure)
-
-    return ET.tostring(base_root, encoding="unicode")
-
-
 def _extract_musicxml_from_mxl(mxl_path: str, out_xml: str) -> None:
     """Audiveris exports .mxl — a zip container holding the actual
     MusicXML plus a META-INF/container.xml manifest, same shape as a
@@ -101,24 +68,8 @@ def _extract_musicxml_from_mxl(mxl_path: str, out_xml: str) -> None:
             shutil.copyfileobj(src, dst)
 
 
-def _run_inference_one_page(img_path: str, out_xml: str) -> None:
-    """Run Audiveris OMR on a single page image, writing MusicXML to
-    out_xml.
-
-    Audiveris writes its output as
-    <output-folder>/<input-basename>/<input-basename>.mxl — it doesn't
-    let you name the output file directly either (same situation oemer
-    was in), so this runs it into a scratch dir and finds the result by
-    glob rather than assuming an exact path.
-
-    In Audiveris 5.x batch mode the ``-export`` flag is sufficient to
-    run the full recognition pipeline and emit MusicXML.  The ``-step``
-    flag takes an OmrStep enum name (LOAD, BINARY, SCALE, GRID,
-    RHYTHMS, PAGE …) and is used to *stop early* at that step — it does
-    NOT enable additional work, so passing ``-step EXPORT`` (EXPORT is
-    not an OmrStep value) both crashes the CLI and is conceptually
-    wrong.  We simply omit ``-step`` and let ``-export`` drive the run.
-    """
+def _run_inference(img_path: str, out_xml: str) -> None:
+    """Run Audiveris OMR on a score file, writing MusicXML to out_xml."""
     import glob
 
     scratch_dir = os.path.join(os.path.dirname(out_xml), "_audiveris_out")
@@ -126,15 +77,11 @@ def _run_inference_one_page(img_path: str, out_xml: str) -> None:
 
     # -batch     : no GUI — required for headless Docker use.
     # -transcribe: run the full recognition pipeline (LOAD → … → PAGE).
-    #              This is the dedicated "process everything" flag shown
-    #              in `audiveris -help`.  Without it, -export alone may
-    #              skip recognition steps when no .omr book exists yet.
     # -force     : re-process even if a cached .omr from a previous
-    #              (possibly partial) run is present in the scratch dir.
+    #              run is present in the scratch dir.
     # -export    : after transcription, write MusicXML (.mxl container).
     # -output    : folder where Audiveris writes its scratch tree + output.
-    # --         : separates Audiveris flags from the input path (safe
-    #              guard in case a filename starts with a dash).
+    # --         : separates Audiveris flags from the input path.
     cmd = [
         AUDIVERIS_BIN,
         "-batch",
@@ -145,9 +92,9 @@ def _run_inference_one_page(img_path: str, out_xml: str) -> None:
         "--", img_path,
     ]
     try:
-        # Full pipeline on a dense multi-instrument page can legitimately
-        # take 2–3 min on modest hardware; 300 s is generous headroom.
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+        # Full pipeline on a dense multi-instrument book can legitimately
+        # take several minutes; 900s is generous headroom.
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=900)
     except FileNotFoundError as exc:
         raise RuntimeError(
             f"Couldn't find/run the Audiveris binary at '{AUDIVERIS_BIN}'. "
@@ -155,7 +102,7 @@ def _run_inference_one_page(img_path: str, out_xml: str) -> None:
             "Dockerfile's build stage if you're seeing this."
         ) from exc
     except subprocess.TimeoutExpired as exc:
-        raise RuntimeError(f"OMR timed out on this page (>300s): {exc}") from exc
+        raise RuntimeError(f"OMR timed out on this file (>900s): {exc}") from exc
 
     if result.returncode != 0:
         raise RuntimeError(f"Audiveris failed: {(result.stderr or result.stdout)[-2000:]}")
@@ -191,57 +138,47 @@ def run_omr(file_obj, progress=gr.Progress()):
     if ext not in (".png", ".jpg", ".jpeg", ".pdf"):
         raise gr.Error("Only PNG, JPG, or PDF files are supported.")
 
+    # Audiveris natively uses the input filename as the <work-title>.
+    # Keep the original basename so the output XML has the correct title.
+    import re
+    base_name = os.path.splitext(os.path.basename(src_path))[0]
+    base_name = re.sub(r'[^\w\s-]', '', base_name).strip() or "score"
+
     temp_dir = tempfile.mkdtemp(prefix="rym-omr-")
     try:
-        image_paths = []
-
         if ext == ".pdf":
             if convert_from_path is None:
                 raise gr.Error(
                     "PDF support isn't available (pdf2image/poppler missing "
                     "— check the Dockerfile installs poppler-utils)."
                 )
-            progress(0.0, desc="Extracting pages…")
+            progress(0.0, desc="Extracting PDF pages…")
             images = convert_from_path(src_path)
             if not images:
                 raise gr.Error("Could not extract any pages from this PDF.")
-            for i, image in enumerate(images):
-                p = os.path.join(temp_dir, f"page_{i}.png")
-                image.save(p, "PNG")
-                image_paths.append(p)
+            
+            # Combine pages into a multi-page TIFF so Audiveris treats
+            # it as a single book, preserving cross-page slurs.
+            target_path = os.path.join(temp_dir, f"{base_name}.tiff")
+            if len(images) == 1:
+                images[0].save(target_path, format="TIFF")
+            else:
+                images[0].save(target_path, format="TIFF", save_all=True, append_images=images[1:])
         else:
-            dst = os.path.join(temp_dir, "input" + ext)
-            shutil.copyfile(src_path, dst)
-            image_paths.append(dst)
+            target_path = os.path.join(temp_dir, f"{base_name}{ext}")
+            shutil.copyfile(src_path, target_path)
 
-        output_xmls = []
-        n = len(image_paths)
-        errors = []
+        progress(0.5, desc="Running Audiveris (this may take a few minutes)…")
+        out_xml = os.path.join(temp_dir, f"{base_name}_out.xml")
+        
+        try:
+            _run_inference(target_path, out_xml)
+        except Exception as exc:
+            raise gr.Error(f"OMR failed: {exc}")
 
-        for i, img_path in enumerate(image_paths):
-            progress(i / max(n, 1), desc=f"Reading page {i + 1} of {n}…")
-            out_xml = os.path.join(temp_dir, f"out_{i}.xml")
-            try:
-                _run_inference_one_page(img_path, out_xml)
-                output_xmls.append(out_xml)
-            except Exception as exc:  # noqa: BLE001 — surface per-page failure, keep going
-                errors.append(f"Page {i + 1}: {exc}")
+        with open(out_xml, "r", encoding="utf-8") as f:
+            xml_str = f.read()
 
-        if not output_xmls:
-            raise gr.Error(
-                "OMR failed on every page. " + "; ".join(errors[:3])
-            )
-
-        progress(0.95, desc="Merging pages…")
-        xml_str = merge_musicxml(output_xmls)
-
-        if errors:
-            gr.Warning(
-                f"{len(errors)} of {n} page(s) failed and were skipped: "
-                + "; ".join(errors[:3])
-            )
-
-        base_name = os.path.splitext(os.path.basename(src_path))[0] or "output"
         download_fd, download_path = tempfile.mkstemp(
             prefix=f"{base_name}-", suffix=".musicxml"
         )
