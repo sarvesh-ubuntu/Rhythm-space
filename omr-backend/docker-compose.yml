@@ -1,0 +1,8 @@
+services:
+  omr-backend:
+    build: .
+    ports:
+      - "7860:7860"
+    restart: unless-stopped
+    # No `deploy: resources: reservations: devices:` GPU block here on
+    # purpose — Audiveris is CPU-only, nothing to pass through.

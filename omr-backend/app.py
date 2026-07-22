@@ -1,28 +1,59 @@
+"""
+Rhythm Space — OMR backend (local Docker, Audiveris engine)
+
+Why this replaces the HF Spaces / ZeroGPU / oemer version:
+  - Audiveris is CPU-only, established (20+ years), fast (seconds per
+    page for typeset scores), and outputs MusicXML natively. No GPU,
+    no per-call duration budgeting, no daily quota, no checkpoint
+    download on first run — none of the ZeroGPU-specific machinery in
+    the previous version of this file is needed anymore.
+  - Audiveris is a separate Java process. We shell out to it via
+    subprocess, the same architectural shape as the old oemer calls,
+    just pointed at a different binary with a different output format
+    (.mxl — a zipped MusicXML container — instead of a raw .musicxml
+    file), which is why _run_inference_one_page below unzips its output
+    before returning.
+  - Printed/typeset scores only — Audiveris does not support handwritten
+    notation. If that's ever a requirement, this engine choice needs
+    revisiting.
+
+Run locally:
+    docker compose up --build
+Then open http://localhost:7860
+"""
+
 import os
-import uuid
-import tempfile
 import shutil
-import threading
 import subprocess
+import tempfile
+import zipfile
 import xml.etree.ElementTree as ET
-from fastapi import FastAPI, UploadFile, File, HTTPException
-from pydantic import BaseModel
-from typing import Dict, Any
+
+import gradio as gr
 
 try:
     from pdf2image import convert_from_path
 except ImportError:
-    pass # Managed via requirements
+    convert_from_path = None
 
-app = FastAPI(title="OMR Async Backend")
 
-# In-memory task store (Use Redis for production scaling)
-tasks: Dict[str, Dict[str, Any]] = {}
+# Resolved once at container build time (see Dockerfile) and written to
+# /etc/environment inside the image. Falling back to a PATH lookup keeps
+# this working if you ever run app.py outside that exact Docker image
+# (e.g. a host install of Audiveris during local development).
+AUDIVERIS_BIN = os.environ.get("AUDIVERIS_BIN") or shutil.which("Audiveris") or "Audiveris"
+
 
 def merge_musicxml(xml_files):
-    """
-    Given a list of paths to MusicXML files (one per page),
-    merge them into a single MusicXML string by concatenating the <measure> elements.
+    """Merge one MusicXML file per page into a single document by
+    concatenating each page's <measure> elements into the first page's
+    <part>.
+
+    Assumes each page's exported score has exactly one <part> (i.e. a
+    single-instrument score — solo piano, solo violin, etc.). A
+    multi-instrument score would need per-part merging instead; that's
+    a pre-existing limitation carried over from the oemer version, not
+    something specific to the Audiveris switch.
     """
     if not xml_files:
         return ""
@@ -30,136 +61,189 @@ def merge_musicxml(xml_files):
         with open(xml_files[0], "r", encoding="utf-8") as f:
             return f.read()
 
-    # Parse the first XML as the base
     base_tree = ET.parse(xml_files[0])
     base_root = base_tree.getroot()
     base_part = base_root.find("part")
-
     if base_part is None:
-        raise ValueError("Invalid MusicXML: No <part> found in the base document.")
+        raise ValueError("Invalid MusicXML: no <part> found in the base page.")
 
-    # Iterate over subsequent pages
     for xml_file in xml_files[1:]:
         tree = ET.parse(xml_file)
-        root = tree.getroot()
-        part = root.find("part")
+        part = tree.getroot().find("part")
         if part is not None:
-            # Append all measures from this page's part into the base part
             for measure in part.findall("measure"):
                 base_part.append(measure)
 
     return ET.tostring(base_root, encoding="unicode")
 
-def process_omr_task(task_id: str, file_path: str, is_pdf: bool):
-    temp_dir = os.path.dirname(file_path)
+
+def _extract_musicxml_from_mxl(mxl_path: str, out_xml: str) -> None:
+    """Audiveris exports .mxl — a zip container holding the actual
+    MusicXML plus a META-INF/container.xml manifest, same shape as a
+    .docx or .pptx. Pull the real score out and write it as raw XML to
+    out_xml so the rest of the pipeline (merge_musicxml, the download
+    button) doesn't need to know .mxl exists at all."""
+    with zipfile.ZipFile(mxl_path) as zf:
+        candidates = [
+            name for name in zf.namelist()
+            if name.lower().endswith(".xml") and not name.startswith("META-INF/")
+        ]
+        if not candidates:
+            raise RuntimeError(
+                f"'{mxl_path}' doesn't look like a valid .mxl file — "
+                "no MusicXML entry found inside it."
+            )
+        # If Audiveris ever emits more than one (e.g. multi-movement
+        # detection), take the largest — almost always the real score,
+        # not a small manifest/fragment.
+        chosen = max(candidates, key=lambda n: zf.getinfo(n).file_size)
+        with zf.open(chosen) as src, open(out_xml, "wb") as dst:
+            shutil.copyfileobj(src, dst)
+
+
+def _run_inference_one_page(img_path: str, out_xml: str) -> None:
+    """Run Audiveris OMR on a single page image, writing MusicXML to
+    out_xml.
+
+    Audiveris writes its output as
+    <output-folder>/<input-basename>/<input-basename>.mxl — it doesn't
+    let you name the output file directly either (same situation oemer
+    was in), so this runs it into a scratch dir and finds the result by
+    glob rather than assuming an exact path.
+    """
+    import glob
+
+    scratch_dir = os.path.join(os.path.dirname(out_xml), "_audiveris_out")
+    os.makedirs(scratch_dir, exist_ok=True)
+
+    # -batch: no GUI. -export: write MusicXML. -- separates Audiveris'
+    # own flags from the input filename, in case a filename ever starts
+    # with a dash.
+    cmd = [AUDIVERIS_BIN, "-batch", "-export", "-output", scratch_dir, "--", img_path]
+    try:
+        # Audiveris on a typeset page is a seconds-to-tens-of-seconds
+        # job, not minutes — this timeout is generous headroom, not a
+        # tight budget the way oemer's was.
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+    except FileNotFoundError as exc:
+        raise RuntimeError(
+            f"Couldn't find/run the Audiveris binary at '{AUDIVERIS_BIN}'. "
+            "This should be baked into the Docker image — check the "
+            "Dockerfile's build stage if you're seeing this."
+        ) from exc
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError(f"OMR timed out on this page (>120s): {exc}") from exc
+
+    if result.returncode != 0:
+        raise RuntimeError(f"Audiveris failed: {(result.stderr or result.stdout)[-2000:]}")
+
+    candidates = sorted(glob.glob(os.path.join(scratch_dir, "**", "*.mxl"), recursive=True))
+    if not candidates:
+        raise RuntimeError(
+            "Audiveris exited successfully but produced no .mxl output "
+            f"in {scratch_dir}. stdout: {result.stdout[-500:]}"
+        )
+    chosen = max(candidates, key=os.path.getmtime)
+    _extract_musicxml_from_mxl(chosen, out_xml)
+
+
+def run_omr(file_obj, progress=gr.Progress()):
+    """Entry point wired to the Gradio Blocks button below. No GPU
+    decorator, no queueing tricks needed — Audiveris runs happily as a
+    plain synchronous subprocess call on ordinary CPU."""
+    if file_obj is None:
+        raise gr.Error("No file provided.")
+
+    src_path = file_obj if isinstance(file_obj, str) else file_obj.name
+    ext = os.path.splitext(src_path)[1].lower()
+    if ext not in (".png", ".jpg", ".jpeg", ".pdf"):
+        raise gr.Error("Only PNG, JPG, or PDF files are supported.")
+
+    temp_dir = tempfile.mkdtemp(prefix="rym-omr-")
     try:
         image_paths = []
-        if is_pdf:
-            tasks[task_id]["status"] = "Extracting pages..."
-            # Convert PDF to images
-            images = convert_from_path(file_path)
+
+        if ext == ".pdf":
+            if convert_from_path is None:
+                raise gr.Error(
+                    "PDF support isn't available (pdf2image/poppler missing "
+                    "— check the Dockerfile installs poppler-utils)."
+                )
+            progress(0.0, desc="Extracting pages…")
+            images = convert_from_path(src_path)
+            if not images:
+                raise gr.Error("Could not extract any pages from this PDF.")
             for i, image in enumerate(images):
-                img_path = os.path.join(temp_dir, f"page_{i}.png")
-                image.save(img_path, "PNG")
-                image_paths.append(img_path)
+                p = os.path.join(temp_dir, f"page_{i}.png")
+                image.save(p, "PNG")
+                image_paths.append(p)
         else:
-            image_paths.append(file_path)
+            dst = os.path.join(temp_dir, "input" + ext)
+            shutil.copyfile(src_path, dst)
+            image_paths.append(dst)
 
-        tasks[task_id]["total"] = len(image_paths)
         output_xmls = []
+        n = len(image_paths)
+        errors = []
 
-        # Process each page
         for i, img_path in enumerate(image_paths):
-            tasks[task_id]["status"] = f"Processing page {i+1} of {len(image_paths)}..."
-            tasks[task_id]["current"] = i + 1
-            
+            progress(i / max(n, 1), desc=f"Reading page {i + 1} of {n}…")
             out_xml = os.path.join(temp_dir, f"out_{i}.xml")
-            
-            # --- CLARITY-OMR SUBPROCESS INVOCATION ---
-            # NOTE: Replace 'python run_inference.py' with the actual Clarity-OMR inference command.
-            # Example: python infer.py --image <img_path> --output <out_xml>
-            cmd = [
-                "python", "infer.py", # User must supply infer.py from Clarity-OMR repo
-                "--image", img_path,
-                "--output", out_xml
-            ]
-            
-            # For demonstration, we simulate success if the script doesn't exist,
-            # or you can wrap it in try-except if the inference script fails.
             try:
-                result = subprocess.run(cmd, capture_output=True, text=True)
-                if result.returncode != 0:
-                    raise Exception(f"Inference failed on page {i+1}: {result.stderr}")
-            except FileNotFoundError:
-                # Fallback / Mock for testing when infer.py is not present
-                with open(out_xml, "w") as f:
-                    f.write('<?xml version="1.0" encoding="UTF-8"?><score-partwise><part id="P1"><measure number="1"></measure></part></score-partwise>')
+                _run_inference_one_page(img_path, out_xml)
+                output_xmls.append(out_xml)
+            except Exception as exc:  # noqa: BLE001 — surface per-page failure, keep going
+                errors.append(f"Page {i + 1}: {exc}")
 
-            output_xmls.append(out_xml)
+        if not output_xmls:
+            raise gr.Error(
+                "OMR failed on every page. " + "; ".join(errors[:3])
+            )
 
-        tasks[task_id]["status"] = "Merging pages..."
-        
-        # Merge all output XMLs into one
-        final_xml_str = merge_musicxml(output_xmls)
-        
-        tasks[task_id]["status"] = "done"
-        tasks[task_id]["result"] = final_xml_str
+        progress(0.95, desc="Merging pages…")
+        xml_str = merge_musicxml(output_xmls)
 
-    except Exception as e:
-        tasks[task_id]["status"] = "error"
-        tasks[task_id]["error"] = str(e)
+        if errors:
+            gr.Warning(
+                f"{len(errors)} of {n} page(s) failed and were skipped: "
+                + "; ".join(errors[:3])
+            )
+
+        base_name = os.path.splitext(os.path.basename(src_path))[0] or "output"
+        download_fd, download_path = tempfile.mkstemp(
+            prefix=f"{base_name}-", suffix=".musicxml"
+        )
+        with os.fdopen(download_fd, "w", encoding="utf-8") as f:
+            f.write(xml_str)
+
+        progress(1.0, desc="Done")
+        return xml_str, download_path
+
     finally:
-        # Cleanup temp directory
-        try:
-            shutil.rmtree(temp_dir)
-        except Exception:
-            pass
+        shutil.rmtree(temp_dir, ignore_errors=True)
 
-@app.post("/predict")
-async def predict_omr(file: UploadFile = File(...)):
-    ext = os.path.splitext(file.filename)[1].lower()
-    if ext not in [".png", ".jpg", ".jpeg", ".pdf"]:
-        raise HTTPException(status_code=400, detail="Only PNG, JPG, or PDF files are supported.")
 
-    task_id = str(uuid.uuid4())
-    temp_dir = tempfile.mkdtemp()
-    in_path = os.path.join(temp_dir, f"input{ext}")
-    
-    with open(in_path, "wb") as buffer:
-        shutil.copyfileobj(file.file, buffer)
+with gr.Blocks(title="Rhythm Space — OMR") as demo:
+    gr.Markdown(
+        "# Rhythm Space — OMR\n"
+        "Upload a scanned score (PNG/JPG/PDF). Runs locally via Audiveris "
+        "— typeset/printed scores only, no handwritten notation."
+    )
+    inp = gr.File(
+        label="Sheet music (PNG/JPG/PDF)",
+        file_types=[".png", ".jpg", ".jpeg", ".pdf"],
+    )
+    btn = gr.Button("Run OMR", variant="primary")
+    out = gr.Textbox(label="MusicXML output", lines=20, show_copy_button=True)
+    out_file = gr.File(label="Download .musicxml")
 
-    tasks[task_id] = {
-        "status": "queued",
-        "current": 0,
-        "total": 0,
-        "result": None,
-        "error": None
-    }
+    btn.click(fn=run_omr, inputs=inp, outputs=[out, out_file], api_name="run_omr")
 
-    is_pdf = (ext == ".pdf")
-
-    # Start background processing thread
-    thread = threading.Thread(target=process_omr_task, args=(task_id, in_path, is_pdf))
-    thread.start()
-
-    return {"task_id": task_id}
-
-@app.get("/status/{task_id}")
-async def get_status(task_id: str):
-    if task_id not in tasks:
-        raise HTTPException(status_code=404, detail="Task not found")
-    
-    task = tasks[task_id]
-    
-    if task["status"] == "done":
-        result = task["result"]
-        # Optionally cleanup to save memory
-        del tasks[task_id]
-        return {"status": "done", "result": result}
-    
-    return {
-        "status": task["status"],
-        "current": task["current"],
-        "total": task["total"],
-        "error": task["error"]
-    }
+# No .queue() needed for GPU-call reasons anymore, but harmless/still
+# useful to keep multiple browser tabs from stepping on each other.
+# server_name="0.0.0.0" is required for the app to be reachable from
+# outside the container (Docker's default bridge network otherwise only
+# exposes 127.0.0.1 inside the container itself).
+demo.queue(max_size=32, default_concurrency_limit=4).launch(
+    server_name="0.0.0.0", server_port=7860
+)

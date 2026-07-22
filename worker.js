@@ -28,13 +28,24 @@ async function handleRequest(request, env) {
   await ensureSchema(env.DB);
 
   // OMR Proxy Routes
+  // The HF Space base URL is stored as a Cloudflare env var (OMR_SPACE_URL).
+  // Set it in wrangler.toml under [vars] or via `wrangler secret put OMR_SPACE_URL`.
+  // Example value: https://yourname-omr-backend.hf.space
+  const hfSpaceBase = (env.OMR_SPACE_URL || '').replace(/\/$/, '');
+
   if (url.pathname === '/api/sheets/omr/predict' && request.method === 'POST') {
-    const hfSpaceUrl = 'https://YOUR_HF_USERNAME-YOUR_SPACE_NAME.hf.space/predict';
+    if (!hfSpaceBase) return json({ error: 'OMR backend is not configured (missing OMR_SPACE_URL)' }, 503);
     try {
-      const hfResponse = await fetch(hfSpaceUrl, {
+      // IMPORTANT: Forward Content-Type so FastAPI can parse the multipart
+      // boundary.  Without this header the server receives an unparseable body.
+      const hfResponse = await fetch(`${hfSpaceBase}/predict`, {
         method: 'POST',
         body: request.body,
-        headers: { 'Accept': 'application/json' }
+        headers: {
+          'Content-Type': request.headers.get('Content-Type') || '',
+          'Accept': 'application/json',
+        },
+        duplex: 'half', // required by Cloudflare Workers when streaming a body
       });
       if (!hfResponse.ok) return json({ error: `OMR Server Error: ${await hfResponse.text()}` }, hfResponse.status);
       return new Response(await hfResponse.text(), { headers: { 'Content-Type': 'application/json; charset=utf-8' } });
@@ -44,10 +55,10 @@ async function handleRequest(request, env) {
   }
 
   if (url.pathname.startsWith('/api/sheets/omr/status/') && request.method === 'GET') {
+    if (!hfSpaceBase) return json({ error: 'OMR backend is not configured (missing OMR_SPACE_URL)' }, 503);
     const taskId = url.pathname.split('/').pop();
-    const hfSpaceUrl = `https://YOUR_HF_USERNAME-YOUR_SPACE_NAME.hf.space/status/${taskId}`;
     try {
-      const hfResponse = await fetch(hfSpaceUrl);
+      const hfResponse = await fetch(`${hfSpaceBase}/status/${taskId}`);
       if (!hfResponse.ok) return json({ error: `OMR Server Error: ${await hfResponse.text()}` }, hfResponse.status);
       return new Response(await hfResponse.text(), { headers: { 'Content-Type': 'application/json; charset=utf-8' } });
     } catch (err) {

@@ -116,7 +116,14 @@ const MXL_TYPE_TO_RYM = {
 };
 
 // Rymspace duration string → quarter-beats (duplicated locally to keep this file standalone)
-const DUR_BEATS = {
+// Named distinctly from engine.js's own DUR_BEATS: both files load as plain
+// (non-module) <script> tags in editor.html, and top-level const/let in
+// classic scripts all share ONE lexical scope across the document. Two
+// files each declaring `const DUR_BEATS` collided as a SyntaxError at parse
+// time, which silently aborted this whole file before it ever reached
+// `window.MusicXML = {...}` at the bottom — that's what made Import/Export
+// XML look "not loaded" with nothing but a console error to show for it.
+const MXL_DUR_BEATS = {
   'whole':           4,
   'half':            2,
   'half-dotted':     3,
@@ -245,14 +252,17 @@ function _matchCategory(name) {
 // show it only when it differs from whatever's currently "in force" for
 // that letter within the measure, and carry the new value forward.
 
-const KEY_SHARP_ORDER = ['F','C','G','D','A','E','B'];
-const KEY_FLAT_ORDER  = ['B','E','A','D','G','C','F'];
+// Same cross-file top-level-const collision as MXL_DUR_BEATS above —
+// engine.js declares its own KEY_SHARP_ORDER/KEY_FLAT_ORDER, and classic
+// <script> tags share one lexical scope, so these need the MXL_ prefix too.
+const MXL_KEY_SHARP_ORDER = ['F','C','G','D','A','E','B'];
+const MXL_KEY_FLAT_ORDER  = ['B','E','A','D','G','C','F'];
 
 function _keyAccidentalDefaults(key) {
   const state = { C:null, D:null, E:null, F:null, G:null, A:null, B:null };
   const fifths = _keyToFifths(key);
   if (!fifths) return state;
-  const order = fifths > 0 ? KEY_SHARP_ORDER : KEY_FLAT_ORDER;
+  const order = fifths > 0 ? MXL_KEY_SHARP_ORDER : MXL_KEY_FLAT_ORDER;
   const acc = fifths > 0 ? '#' : 'b';
   for (let i = 0; i < Math.abs(fifths); i++) state[order[i]] = acc;
   return state;
@@ -388,7 +398,7 @@ function _buildExportMeasures(part) {
     if (ev.type !== 'note' && ev.type !== 'rest') continue;
 
     // ── Sounding events — may need a new measure ──────────────────
-    const b = DUR_BEATS[ev.duration] ?? 0;
+    const b = MXL_DUR_BEATS[ev.duration] ?? 0;
 
     if (beat > EPS && beat + b > cap + EPS) {
       cur = pushMeasure();
@@ -1084,7 +1094,7 @@ function importMusicXML(xmlString) {
             rymDur = 'quarter-triplet';
           } else if (dotEls.length > 0) {
             const dotted = rymDur + '-dotted';
-            if (DUR_BEATS[dotted] !== undefined) rymDur = dotted;
+            if (MXL_DUR_BEATS[dotted] !== undefined) rymDur = dotted;
           }
 
           const ev = {
