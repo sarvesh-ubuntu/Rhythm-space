@@ -111,29 +111,35 @@ def _run_inference_one_page(img_path: str, out_xml: str) -> None:
     was in), so this runs it into a scratch dir and finds the result by
     glob rather than assuming an exact path.
 
-    The critical flag here is ``-step EXPORT``.  Without it, Audiveris
-    in batch mode stops after the early image-processing steps (LOAD,
-    SCALE, BINARY) and never runs pitch/rhythm recognition — the
-    resulting .mxl is either empty or contains only bare measure
-    scaffolding with no notes.  ``-step EXPORT`` tells Audiveris to run
-    *all* pipeline steps through the export phase.
+    In Audiveris 5.x batch mode the ``-export`` flag is sufficient to
+    run the full recognition pipeline and emit MusicXML.  The ``-step``
+    flag takes an OmrStep enum name (LOAD, BINARY, SCALE, GRID,
+    RHYTHMS, PAGE …) and is used to *stop early* at that step — it does
+    NOT enable additional work, so passing ``-step EXPORT`` (EXPORT is
+    not an OmrStep value) both crashes the CLI and is conceptually
+    wrong.  We simply omit ``-step`` and let ``-export`` drive the run.
     """
     import glob
 
     scratch_dir = os.path.join(os.path.dirname(out_xml), "_audiveris_out")
     os.makedirs(scratch_dir, exist_ok=True)
 
-    # -batch: no GUI.
-    # -step EXPORT: run the full recognition pipeline through MusicXML
-    #   export.  This is the flag that was missing — without it, batch
-    #   mode exits after SCALE/BINARY and produces an empty score.
-    # -export: write the result as MusicXML (.mxl container).
-    # -output: destination folder for Audiveris' own scratch/output tree.
-    # -- separates Audiveris flags from the input filename.
+    # -batch     : no GUI — required for headless Docker use.
+    # -transcribe: run the full recognition pipeline (LOAD → … → PAGE).
+    #              This is the dedicated "process everything" flag shown
+    #              in `audiveris -help`.  Without it, -export alone may
+    #              skip recognition steps when no .omr book exists yet.
+    # -force     : re-process even if a cached .omr from a previous
+    #              (possibly partial) run is present in the scratch dir.
+    # -export    : after transcription, write MusicXML (.mxl container).
+    # -output    : folder where Audiveris writes its scratch tree + output.
+    # --         : separates Audiveris flags from the input path (safe
+    #              guard in case a filename starts with a dash).
     cmd = [
         AUDIVERIS_BIN,
         "-batch",
-        "-step", "EXPORT",
+        "-transcribe",
+        "-force",
         "-export",
         "-output", scratch_dir,
         "--", img_path,
