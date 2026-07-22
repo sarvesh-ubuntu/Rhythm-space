@@ -110,21 +110,38 @@ def _run_inference_one_page(img_path: str, out_xml: str) -> None:
     let you name the output file directly either (same situation oemer
     was in), so this runs it into a scratch dir and finds the result by
     glob rather than assuming an exact path.
+
+    The critical flag here is ``-step EXPORT``.  Without it, Audiveris
+    in batch mode stops after the early image-processing steps (LOAD,
+    SCALE, BINARY) and never runs pitch/rhythm recognition — the
+    resulting .mxl is either empty or contains only bare measure
+    scaffolding with no notes.  ``-step EXPORT`` tells Audiveris to run
+    *all* pipeline steps through the export phase.
     """
     import glob
 
     scratch_dir = os.path.join(os.path.dirname(out_xml), "_audiveris_out")
     os.makedirs(scratch_dir, exist_ok=True)
 
-    # -batch: no GUI. -export: write MusicXML. -- separates Audiveris'
-    # own flags from the input filename, in case a filename ever starts
-    # with a dash.
-    cmd = [AUDIVERIS_BIN, "-batch", "-export", "-output", scratch_dir, "--", img_path]
+    # -batch: no GUI.
+    # -step EXPORT: run the full recognition pipeline through MusicXML
+    #   export.  This is the flag that was missing — without it, batch
+    #   mode exits after SCALE/BINARY and produces an empty score.
+    # -export: write the result as MusicXML (.mxl container).
+    # -output: destination folder for Audiveris' own scratch/output tree.
+    # -- separates Audiveris flags from the input filename.
+    cmd = [
+        AUDIVERIS_BIN,
+        "-batch",
+        "-step", "EXPORT",
+        "-export",
+        "-output", scratch_dir,
+        "--", img_path,
+    ]
     try:
-        # Audiveris on a typeset page is a seconds-to-tens-of-seconds
-        # job, not minutes — this timeout is generous headroom, not a
-        # tight budget the way oemer's was.
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+        # Full pipeline on a dense multi-instrument page can legitimately
+        # take 2–3 min on modest hardware; 300 s is generous headroom.
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
     except FileNotFoundError as exc:
         raise RuntimeError(
             f"Couldn't find/run the Audiveris binary at '{AUDIVERIS_BIN}'. "
@@ -132,19 +149,28 @@ def _run_inference_one_page(img_path: str, out_xml: str) -> None:
             "Dockerfile's build stage if you're seeing this."
         ) from exc
     except subprocess.TimeoutExpired as exc:
-        raise RuntimeError(f"OMR timed out on this page (>120s): {exc}") from exc
+        raise RuntimeError(f"OMR timed out on this page (>300s): {exc}") from exc
 
     if result.returncode != 0:
         raise RuntimeError(f"Audiveris failed: {(result.stderr or result.stdout)[-2000:]}")
 
-    candidates = sorted(glob.glob(os.path.join(scratch_dir, "**", "*.mxl"), recursive=True))
+    # Audiveris may emit .mxl (zip container) or plain .xml depending on
+    # version and step configuration — check both.
+    candidates = sorted(
+        glob.glob(os.path.join(scratch_dir, "**", "*.mxl"), recursive=True)
+        + glob.glob(os.path.join(scratch_dir, "**", "*.xml"), recursive=True)
+    )
     if not candidates:
         raise RuntimeError(
-            "Audiveris exited successfully but produced no .mxl output "
+            "Audiveris exited successfully but produced no .mxl/.xml output "
             f"in {scratch_dir}. stdout: {result.stdout[-500:]}"
         )
     chosen = max(candidates, key=os.path.getmtime)
-    _extract_musicxml_from_mxl(chosen, out_xml)
+    if chosen.lower().endswith(".mxl"):
+        _extract_musicxml_from_mxl(chosen, out_xml)
+    else:
+        # Plain .xml — copy directly; no unzipping needed.
+        shutil.copyfile(chosen, out_xml)
 
 
 def run_omr(file_obj, progress=gr.Progress()):

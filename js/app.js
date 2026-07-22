@@ -1081,7 +1081,7 @@ async function handleExportXML() {
   toast('Exported as MusicXML');
 }
  
-function loadXmlString(raw) {
+function loadXmlString(raw, hintTitle) {
   try {
     const result = window.MusicXML.importMusicXML(raw);
 
@@ -1096,14 +1096,19 @@ function loadXmlString(raw) {
     setCloudSheetId('');
     currentFileHandle = null;
 
-    if (result.title) {
-      document.getElementById('comp-title').value = result.title;
+    // Use the XML's own work-title if present; otherwise fall back to the
+    // caller-supplied hint (e.g. a cleaned-up filename from the OMR flow).
+    const titleToUse = (result.title && result.title.trim()) ? result.title.trim() : (hintTitle || '');
+    if (titleToUse) {
+      document.getElementById('comp-title').value = titleToUse;
     }
 
     afterMutation();
-    toast(`Imported "${result.title || 'Score'}" — ${result.parts.length} part(s)`);
+    toast(`Imported "${titleToUse || 'Score'}" — ${result.parts.length} part(s)`);
+    return true;   // signal success to callers
   } catch (err) {
     toast('Import failed: ' + err.message);
+    return false;
   }
 }
 
@@ -1162,6 +1167,18 @@ async function handleScanOMR() {
     const file = e.target.files?.[0];
     if (!file) return;
 
+    // Derive a human-readable title from the filename before we do
+    // anything async — Audiveris never OCRs the title from the page, so
+    // the MusicXML <work-title> will almost always be empty.
+    //   "shape_of_my_heart.pdf"  →  "Shape of My Heart"
+    //   "symphony-no-5.jpg"      →  "Symphony No 5"
+    const hintTitle = file.name
+      .replace(/\.[^.]+$/, '')           // strip extension
+      .replace(/[-_]+/g, ' ')            // dashes / underscores → spaces
+      .replace(/\s+/g, ' ')             // collapse multiple spaces
+      .trim()
+      .replace(/\b\w/g, c => c.toUpperCase()); // title-case each word
+
     let scanToast = toast('Uploading sheet music...', { duration: 0 });
 
     try {
@@ -1199,20 +1216,24 @@ async function handleScanOMR() {
           
           if (statusData.status === 'done') {
             clearInterval(pollInterval);
-            scanToast.remove();
-            loadXmlString(statusData.result);
-            toast('Sheet music successfully scanned and imported!');
+            if (scanToast) scanToast.remove();
+            const ok = loadXmlString(statusData.result, hintTitle);
+            if (ok) {
+              // Open the parts panel so the user can immediately rename parts.
+              showMenu('parts-menu', document.getElementById('btn-parts'));
+              toast('Sheet scanned — click a part name to rename it.');
+            }
           } else if (statusData.status === 'error') {
             clearInterval(pollInterval);
-            scanToast.remove();
+            if (scanToast) scanToast.remove();
             toast(`OMR Error: ${statusData.error}`);
           } else {
             // Update toast message with current progress
-            scanToast.innerText = `OMR: ${statusData.status}`;
+            if (scanToast) scanToast.innerText = `OMR: ${statusData.status}`;
           }
         } catch (err) {
           clearInterval(pollInterval);
-          scanToast.remove();
+          if (scanToast) scanToast.remove();
           toast(`Polling error: ${err.message}`);
         }
       }, 3000);

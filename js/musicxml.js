@@ -198,6 +198,37 @@ function _mxlToRymClef(sign, line) {
 }
 
 /**
+ * Map a GM MIDI program number (1-based, as written in MusicXML) to a
+ * Rymspace category.  MIDI program numbers are a reliable, unambiguous
+ * signal for instrument family that Audiveris always emits correctly
+ * even when the instrument-name text defaults to "Piano" for everything.
+ *
+ * Reference: General MIDI Level 1 Sound Set (groups of 8 per family).
+ */
+function _categoryFromMidiProgram(prog) {
+  const p = parseInt(prog, 10);
+  if (!p || isNaN(p)) return null;
+  if (p >= 1   && p <= 8)   return 'struck-strings';    // Piano family
+  if (p >= 9   && p <= 16)  return 'metal-percussion';  // Chromatic perc (bells, vibraphone…)
+  if (p >= 17  && p <= 24)  return 'sustained-keys';    // Organ family
+  if (p >= 25  && p <= 32)  return 'plucked-strings';   // Guitar family
+  if (p >= 33  && p <= 40)  return 'plucked-strings';   // Bass (fretted) — close enough for now
+  if (p >= 41  && p <= 48)  return 'bowed-strings';     // Strings (violin, viola, cello…)
+  if (p >= 49  && p <= 52)  return 'bowed-strings';     // Ensemble strings
+  if (p >= 53  && p <= 55)  return 'bowed-strings';     // Choir / voice (no better fit)
+  if (p >= 56  && p <= 64)  return 'brass';             // Brass family
+  if (p >= 65  && p <= 72)  return 'reed-winds';        // Reed family (sax, oboe, bassoon…)
+  if (p >= 73  && p <= 80)  return 'open-winds';        // Pipe family (flute, recorder…)
+  if (p >= 81  && p <= 88)  return 'sustained-keys';    // Synth lead
+  if (p >= 89  && p <= 96)  return 'sustained-keys';    // Synth pad
+  if (p >= 97  && p <= 104) return 'sustained-keys';    // Synth effects
+  if (p >= 105 && p <= 112) return 'plucked-strings';   // Ethnic (sitar, banjo, shamisen…)
+  if (p >= 113 && p <= 120) return 'tuned-bars';        // Percussive (woodblock, agogo…)
+  if (p >= 121 && p <= 128) return 'membrane-percussion'; // Sound effects / drums
+  return null;
+}
+
+/**
  * Match a free-text instrument name (from a MusicXML <instrument-name> or
  * <part-name>) to one of Rymspace's v10 physics categories.
  *
@@ -920,7 +951,16 @@ function importMusicXML(xmlString) {
     const partName  = scorePart?.querySelector('part-name')?.textContent?.trim() || `Part ${i + 1}`;
     const instrEl   = scorePart?.querySelector('instrument-name');
     const instrName = instrEl?.textContent?.trim() || partName || 'Piano';
-    const category  = _matchCategory(instrName) || _matchCategory(partName);
+
+    // MIDI program number is the most reliable instrument-family signal:
+    // Audiveris always emits the correct GM program even when it leaves
+    // the instrument-name text as "Piano" for everything.  Try it first;
+    // fall back to the text-match helper only when absent.
+    const midiProgEl = scorePart?.querySelector('midi-instrument > midi-program');
+    const category   =
+      _categoryFromMidiProgram(midiProgEl?.textContent) ||
+      _matchCategory(instrName) ||
+      _matchCategory(partName);
 
     const notes    = [];   // flat Rymspace event array
     const slurs    = [];   // { fromId, toId }
